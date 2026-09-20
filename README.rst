@@ -13,7 +13,8 @@ Features
 - Top-right anchored; auto-sizes to the text and repositions each second.
 - Click-through (no input), so it never interferes with your workflow.
 - Configurable font family, font size (px), foreground and background colors.
-- Minimal resource usage; no timers spinning—sleeps until the next second.
+- **New:** ``--time-only`` to show ``HH:MM:SS`` (no date).
+- **New:** ``--debug`` adds verbose diagnostics to stderr.
 
 Build
 -----
@@ -33,13 +34,14 @@ Then build and run::
 
   meson setup build
   meson compile -C build
-  ./build/x11-datetime-overlay --font "DejaVu Sans Mono" --size 18 --fg #EAEAEA --bg #101010 --margin 10
+  ./build/x11-datetime-overlay --time-only --font "DejaVu Sans Mono" \
+    --size 18 --fg #EAEAEA --bg #101010 --margin 10
 
 Usage
 -----
 ::
 
-  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX]
+  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--debug]
   x11-datetime-overlay -h | --help
 
 Options:
@@ -48,6 +50,8 @@ Options:
       --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).
       --bg  #RRGGBB     Background color (default: #000000).
   -m, --margin PX       Outer margin (default: 8).
+  -t, --time-only       Show only time (HH:MM:SS), omit the date.
+  -d, --debug           Verbose debug logs to stderr (window geometry, events).
   -h, --help            Show help.
 
 Notes on Window Behavior

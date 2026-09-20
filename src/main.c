@@ -26,6 +26,8 @@ typedef struct {
   uint32_t margin_px;
   double fg_r, fg_g, fg_b;
   double bg_r, bg_g, bg_b;
+  bool time_only;
+  bool debug;
 } options_t;
 
 static void print_help(const char *prog) {
@@ -33,7 +35,7 @@ static void print_help(const char *prog) {
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -42,10 +44,12 @@ static void print_help(const char *prog) {
     "      --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).\n"
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 8).\n"
+    "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
+    "  -d, --debug           Verbose debug logs to stderr.\n"
     "  -h, --help            Show this help and exit.\n"
     "\n"
     "Example:\n"
-    "  %s --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
+    "  %s --time-only --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
     prog, prog, prog
   );
 }
@@ -102,6 +106,15 @@ static void intern_atom(xcb_connection_t *c, const char *name, xcb_atom_t *out) 
   }
 }
 
+static const char *event_name(uint8_t rt) {
+  switch (rt) {
+    case XCB_EXPOSE: return "Expose";
+    case XCB_VISIBILITY_NOTIFY: return "VisibilityNotify";
+    case XCB_CONFIGURE_NOTIFY: return "ConfigureNotify";
+    default: return "Other";
+  }
+}
+
 static void set_evmh_hints(xcb_connection_t *c, xcb_window_t win) {
   // Best-effort EWMH hints: set type DOCK, stick to all desktops, keep ABOVE+STICKY
   xcb_atom_t _NET_WM_WINDOW_TYPE, _NET_WM_WINDOW_TYPE_DOCK;
@@ -145,11 +158,12 @@ static void set_evmh_hints(xcb_connection_t *c, xcb_window_t win) {
   }
 }
 
-static void now_timestr(char *buf, size_t bufsz) {
+static void now_timestr(char *buf, size_t bufsz, bool time_only) {
   time_t t = time(NULL);
   struct tm lt;
   localtime_r(&t, &lt);
-  strftime(buf, bufsz, "%Y-%m-%d %H:%M:%S", &lt);
+  const char *fmt = time_only ? "%H:%M:%S" : "%Y-%m-%d %H:%M:%S";
+  strftime(buf, bufsz, fmt, &lt);
 }
 
 static long ms_to_next_second(void) {
@@ -166,30 +180,50 @@ int main(int argc, char **argv) {
     .font_size_px = 16.0,
     .margin_px = 8,
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
-    .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0
+    .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
+    .time_only = false,
+    .debug = false
   };
 
   static struct option long_opts[] = {
-    {"help",   no_argument,       0, 'h'},
-    {"font",   required_argument, 0, 'f'},
-    {"size",   required_argument, 0, 's'},
-    {"fg",     required_argument, 0,  1 },
-    {"bg",     required_argument, 0,  2 },
-    {"margin", required_argument, 0, 'm'},
+    {"help",      no_argument,       0, 'h'},
+    {"font",      required_argument, 0, 'f'},
+    {"size",      required_argument, 0, 's'},
+    {"fg",        required_argument, 0,  1  },
+    {"bg",        required_argument, 0,  2  },
+    {"margin",    required_argument, 0, 'm'},
+    {"time-only", no_argument,       0, 't'},
+    {"debug",     no_argument,       0, 'd'},
     {0,0,0,0}
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:", long_opts, &idx)) != -1) {
+  while ((c = getopt_long(argc, argv, "hf:s:m:td", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
       case 's': opt.font_size_px = strtod(optarg, NULL); if (opt.font_size_px <= 0) opt.font_size_px = 16.0; break;
       case 'm': opt.margin_px = (uint32_t)strtoul(optarg, NULL, 10); break;
-      case 1:   if (!parse_rgb_hex(optarg, &opt.fg_r, &opt.fg_g, &opt.fg_b)) { fprintf(stderr, "Invalid --fg color, use #RRGGBB\n"); return 2; } break;
-      case 2:   if (!parse_rgb_hex(optarg, &opt.bg_r, &opt.bg_g, &opt.bg_b)) { fprintf(stderr, "Invalid --bg color, use #RRGGBB\n"); return 2; } break;
+      case 't': opt.time_only = true; break;
+      case 'd': opt.debug = true; break;
+      case 1:
+        if (!parse_rgb_hex(optarg, &opt.fg_r, &opt.fg_g, &opt.fg_b)) {
+          fprintf(stderr, "Invalid --fg color, use #RRGGBB\n"); return 2;
+        }
+        break;
+      case 2:
+        if (!parse_rgb_hex(optarg, &opt.bg_r, &opt.bg_g, &opt.bg_b)) {
+          fprintf(stderr, "Invalid --bg color, use #RRGGBB\n"); return 2;
+        }
+        break;
       default:  print_help(argv[0]); return 2;
     }
+  }
+
+  if (opt.debug) {
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+            opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only,
+            opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
   int screen_num = 0;
@@ -207,6 +241,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Could not get default screen\n");
     xcb_disconnect(cconn);
     return 1;
+  }
+  if (opt.debug) {
+    fprintf(stderr, "[debug] screen: %ux%u, screen_num=%d\n",
+            screen->width_in_pixels, screen->height_in_pixels, screen_num);
   }
 
   xcb_visualtype_t *visual = get_visualtype_for_screen(setup, screen);
@@ -238,6 +276,9 @@ int main(int argc, char **argv) {
     screen->root_visual,
     cw_mask, cw_values
   );
+  if (opt.debug) {
+    fprintf(stderr, "[debug] created window id=0x%08x\n", win);
+  }
 
   // Make the window click-through (no input), so it never steals focus.
   xcb_shape_rectangles(
@@ -281,6 +322,9 @@ int main(int argc, char **argv) {
     xcb_generic_event_t *ev;
     while ((ev = xcb_poll_for_event(cconn)) != NULL) {
       uint8_t rt = ev->response_type & ~0x80;
+      if (opt.debug) {
+        fprintf(stderr, "[debug] event: %s (%u)\n", event_name(rt), rt);
+      }
       if (rt == XCB_EXPOSE || rt == XCB_VISIBILITY_NOTIFY || rt == XCB_CONFIGURE_NOTIFY) {
         need_redraw = true;
       }
@@ -294,9 +338,9 @@ int main(int argc, char **argv) {
 
     if (need_redraw) {
       char nowbuf[64];
-      now_timestr(nowbuf, sizeof(nowbuf));
+      now_timestr(nowbuf, sizeof(nowbuf), opt.time_only);
 
-      // Only re-measure/reposition if text width changed
+      // Only re-measure/reposition if text width changed (we measure every tick; cheap)
       cairo_select_font_face(measure_cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(measure_cr, opt.font_size_px);
 
@@ -325,6 +369,11 @@ int main(int argc, char **argv) {
       mask |= XCB_CONFIG_WINDOW_HEIGHT; cfg[cidx++] = (uint32_t)win_h;
       mask |= XCB_CONFIG_WINDOW_STACK_MODE; cfg[cidx++] = XCB_STACK_MODE_ABOVE;
       xcb_configure_window(cconn, win, mask, cfg);
+
+      if (opt.debug) {
+        fprintf(stderr, "[debug] tick str=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d)\n",
+                nowbuf, text_w, text_h, win_w, win_h, new_x, new_y);
+      }
 
       // Create drawing surface for this window size
       cairo_surface_t *surface = cairo_xcb_surface_create(cconn, win, visual, win_w, win_h);
