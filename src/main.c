@@ -32,6 +32,7 @@ typedef struct {
   bool time_only;
   bool debug;
   int flash_minutes; // 0 disables
+  bool show_flash_count;
 } options_t;
 
 typedef struct {
@@ -45,7 +46,7 @@ static void print_help(const char *prog) {
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -56,11 +57,12 @@ static void print_help(const char *prog) {
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 8).\n"
     "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
+    "  -c, --show-flash-count Append \"(N)\" with total flashes since start (N>0).\n"
     "  -d, --debug           Verbose debug logs to stderr.\n"
     "  -h, --help            Show this help and exit.\n"
     "\n"
     "Example:\n"
-    "  %s --time-only --flash 1 --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
+    "  %s --time-only --flash 1 --show-flash-count --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
     prog, prog, prog
   );
 }
@@ -195,7 +197,8 @@ int main(int argc, char **argv) {
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .time_only = false,
     .debug = false,
-    .flash_minutes = 0
+    .flash_minutes = 0,
+    .show_flash_count = false
   };
 
   static struct option long_opts[] = {
@@ -207,12 +210,13 @@ int main(int argc, char **argv) {
     {"margin",    required_argument, 0, 'm'},
     {"time-only", no_argument,       0, 't'},
     {"flash",     required_argument, 0, 'F'},
+    {"show-flash-count", no_argument, 0, 'c'},
     {"debug",     no_argument,       0, 'd'},
     {0,0,0,0}
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:tF:d", long_opts, &idx)) != -1) {
+  while ((c = getopt_long(argc, argv, "hf:s:m:tF:cd", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
@@ -224,6 +228,7 @@ int main(int argc, char **argv) {
           if (v < 0) v = 0;
           opt.flash_minutes = (int)v;
         } break;
+      case 'c': opt.show_flash_count = true; break;
       case 'd': opt.debug = true; break;
       case 1:
         if (!parse_rgb_hex(optarg, &opt.fg_r, &opt.fg_g, &opt.fg_b)) {
@@ -240,9 +245,9 @@ int main(int argc, char **argv) {
   }
 
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
             opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
-            opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
+            opt.show_flash_count, opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
   int screen_num = 0;
@@ -327,11 +332,12 @@ int main(int argc, char **argv) {
 
   // Flash state (boundary-aligned)
   flash_state_t flash = { .active = false, .start = 0, .last_boundary_min_epoch = -1 };
+  uint64_t flash_count = 0;
 
   // Main loop: poll X for events. During flash, update every 50ms; otherwise,
   // sleep to next second to keep CPU minimal.
   int xfd = xcb_get_file_descriptor(cconn);
-  char last_str[64] = {0};
+  char last_str[128] = {0};
 
   for (;;) {
     long timeout_ms = flash.active ? FLASH_STEP_MS : ms_to_next_second();
@@ -373,9 +379,11 @@ int main(int argc, char **argv) {
             flash.active = true;
             flash.start = now;
             flash.last_boundary_min_epoch = epoch_min;
+            flash_count++;
             if (opt.debug) {
-              fprintf(stderr, "[debug] flash start: epoch_min=%ld (time %02d:%02d)\n",
-                      epoch_min, lt.tm_hour, lt.tm_min);
+              fprintf(stderr, "[debug] flash start: epoch_min=%ld (time %02d:%02d) count=%llu\n",
+                      epoch_min, lt.tm_hour, lt.tm_min,
+                      (unsigned long long)flash_count);
             }
           }
         }
@@ -383,7 +391,8 @@ int main(int argc, char **argv) {
           double elapsed = difftime(now, flash.start);
           if (elapsed >= FLASH_DURATION_SEC) {
             flash.active = false;
-            if (opt.debug) fprintf(stderr, "[debug] flash end\n");
+            if (opt.debug) fprintf(stderr, "[debug] flash end (count=%llu)\n",
+                                   (unsigned long long)flash_count);
           }
         }
       }
@@ -391,12 +400,21 @@ int main(int argc, char **argv) {
       char nowbuf[64];
       now_timestr(nowbuf, sizeof(nowbuf), opt.time_only);
 
+      // Compose display string with optional flash count
+      char dispbuf[128];
+      if (opt.show_flash_count && flash_count > 0) {
+        snprintf(dispbuf, sizeof(dispbuf), "%s (%llu)", nowbuf,
+                 (unsigned long long)flash_count);
+      } else {
+        snprintf(dispbuf, sizeof(dispbuf), "%s", nowbuf);
+      }
+
       // Re-measure text
       cairo_select_font_face(measure_cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(measure_cr, opt.font_size_px);
 
       cairo_text_extents_t te;
-      cairo_text_extents(measure_cr, nowbuf, &te);
+      cairo_text_extents(measure_cr, dispbuf, &te);
 
       cairo_font_extents_t fe;
       cairo_font_extents(measure_cr, &fe);
@@ -450,14 +468,15 @@ int main(int argc, char **argv) {
         fg_b = 1.0 - bg_b;
 
         if (opt.debug) {
-          fprintf(stderr, "[debug] flash tick: p=%.3f bg=%.3f,%.3f,%.3f fg(inv)=%.3f,%.3f,%.3f\n",
-                  p, bg_r, bg_g, bg_b, fg_r, fg_g, fg_b);
+          fprintf(stderr, "[debug] flash tick: p=%.3f bg=%.3f,%.3f,%.3f fg(inv)=%.3f,%.3f,%.3f disp=\"%s\"\n",
+                  p, bg_r, bg_g, bg_b, fg_r, fg_g, fg_b, dispbuf);
         }
       }
 
-      if (opt.debug) {
-        fprintf(stderr, "[debug] tick str=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d) flash=%d\n",
-                nowbuf, text_w, text_h, win_w, win_h, new_x, new_y, flash.active);
+      if (opt.debug && !flash.active) {
+        fprintf(stderr, "[debug] tick disp=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d) flash=%d count=%llu\n",
+                dispbuf, text_w, text_h, win_w, win_h, new_x, new_y, flash.active,
+                (unsigned long long)flash_count);
       }
 
       // Create drawing surface for this window size
@@ -477,13 +496,13 @@ int main(int argc, char **argv) {
       double text_y = pad + fe.ascent;        // baseline
 
       cairo_move_to(cr, text_x, text_y);
-      cairo_show_text(cr, nowbuf);
+      cairo_show_text(cr, dispbuf);
       cairo_surface_flush(surface);
       cairo_destroy(cr);
       cairo_surface_destroy(surface);
 
       xcb_flush(cconn);
-      strncpy(last_str, nowbuf, sizeof(last_str)-1);
+      strncpy(last_str, dispbuf, sizeof(last_str)-1);
       last_str[sizeof(last_str)-1] = '\0';
     }
   }

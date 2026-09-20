@@ -20,6 +20,8 @@ Features
   50ms color updates (no startup timer; boundary-aligned). During a flash,
   the background fades and the foreground is always the inverse of the
   current background for maximum contrast.
+- **New:** ``--show-flash-count`` appends ``(N)`` with the number of flashes
+  since program start (only shown when ``N > 0``).
 
 Build
 -----
@@ -40,13 +42,14 @@ Then build and run::
   meson setup build
   meson compile -C build
   ./build/x11-datetime-overlay --time-only --font "DejaVu Sans Mono" \
-    --size 18 --fg #EAEAEA --bg #101010 --margin 10 --flash 1
+    --size 18 --fg #EAEAEA --bg #101010 --margin 10 --flash 1 \
+    --show-flash-count
 
 Usage
 -----
 ::
 
-  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--debug]
+  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--show-flash-count] [--debug]
   x11-datetime-overlay -h | --help
 
 Options:
@@ -58,6 +61,8 @@ Options:
   -t, --time-only       Show only time (HH:MM:SS), omit the date.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
                         (minute % MIN == 0) at second 00. Disabled if 0.
+  -c, --show-flash-count
+                        Append "(N)" with total flashes since start (N>0).
   -d, --debug           Verbose debug logs to stderr (window geometry, events).
   -h, --help            Show help.
 
