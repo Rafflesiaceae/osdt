@@ -333,9 +333,7 @@ int main(int argc, char **argv) {
   char last_str[64] = {0};
 
   for (;;) {
-    long sec_wait = ms_to_next_second();
-    long timeout_ms = flash.active ? (FLASH_STEP_MS < sec_wait ? FLASH_STEP_MS : sec_wait)
-                                   : sec_wait;
+    long timeout_ms = flash.active ? FLASH_STEP_MS : ms_to_next_second();
 
     struct pollfd pfd = { .fd = xfd, .events = POLLIN };
     int pr = poll(&pfd, 1, (int)timeout_ms);
@@ -422,7 +420,10 @@ int main(int argc, char **argv) {
       mask |= XCB_CONFIG_WINDOW_STACK_MODE; cfg[cidx++] = XCB_STACK_MODE_ABOVE;
       xcb_configure_window(cconn, win, mask, cfg);
 
-      // Compute colors (with optional flash fade, 50ms steps)
+      // Compute colors:
+      // - Normal: use configured fg/bg.
+      // - Flash: background fades from inverted(orig_bg) -> orig_bg over 30s;
+      //          foreground is always inverse of CURRENT background.
       double fg_r = opt.fg_r, fg_g = opt.fg_g, fg_b = opt.fg_b;
       double bg_r = opt.bg_r, bg_g = opt.bg_g, bg_b = opt.bg_b;
 
@@ -431,20 +432,19 @@ int main(int argc, char **argv) {
         double p = elapsed / (double)FLASH_DURATION_SEC; // 0 -> 1
         if (p < 0.0) p = 0.0; if (p > 1.0) p = 1.0;
 
-        double inv_fg_r = 1.0 - opt.fg_r, inv_fg_g = 1.0 - opt.fg_g, inv_fg_b = 1.0 - opt.fg_b;
         double inv_bg_r = 1.0 - opt.bg_r, inv_bg_g = 1.0 - opt.bg_g, inv_bg_b = 1.0 - opt.bg_b;
-
-        fg_r = inv_fg_r * (1.0 - p) + opt.fg_r * p;
-        fg_g = inv_fg_g * (1.0 - p) + opt.fg_g * p;
-        fg_b = inv_fg_b * (1.0 - p) + opt.fg_b * p;
 
         bg_r = inv_bg_r * (1.0 - p) + opt.bg_r * p;
         bg_g = inv_bg_g * (1.0 - p) + opt.bg_g * p;
         bg_b = inv_bg_b * (1.0 - p) + opt.bg_b * p;
 
+        fg_r = 1.0 - bg_r;
+        fg_g = 1.0 - bg_g;
+        fg_b = 1.0 - bg_b;
+
         if (opt.debug) {
-          fprintf(stderr, "[debug] flash tick: p=%.3f fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
-                  p, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b);
+          fprintf(stderr, "[debug] flash tick: p=%.3f bg=%.3f,%.3f,%.3f fg(inv)=%.3f,%.3f,%.3f\n",
+                  p, bg_r, bg_g, bg_b, fg_r, fg_g, fg_b);
         }
       }
 

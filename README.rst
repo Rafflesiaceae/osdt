@@ -17,7 +17,9 @@ Features
 - **New:** ``--debug`` adds verbose diagnostics to stderr.
 - **New:** ``--flash MIN`` inverts colors when ``minute % MIN == 0`` and
   ``second == 0``, then smoothly fades back to normal over 30 seconds with
-  50ms color updates (no startup timer; boundary-aligned).
+  50ms color updates (no startup timer; boundary-aligned). During a flash,
+  the background fades and the foreground is always the inverse of the
+  current background for maximum contrast.
 
 Build
 -----
