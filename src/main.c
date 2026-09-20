@@ -701,8 +701,10 @@ static long ms_to_next_second(void) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   long ms = ts.tv_nsec / 1000000L;
-  long rem = 1000L - (ms % 1000L);
-  return (rem == 1000L) ? 0L : rem;
+
+  // At an exact boundary, wait for the next second instead of returning zero
+  // and repainting repeatedly until the clock advances by one millisecond.
+  return 1000L - ms;
 }
 
 int main(int argc, char **argv) {
@@ -947,6 +949,24 @@ int main(int argc, char **argv) {
   xcb_map_window(cconn, win);
   uint32_t cfg_vals[1] = { XCB_STACK_MODE_ABOVE };
   xcb_configure_window(cconn, win, XCB_CONFIG_WINDOW_STACK_MODE, cfg_vals);
+
+  // Completed frames are copied from an off-screen pixmap in one X request,
+  // preventing partially painted frames from becoming visible.
+  xcb_gcontext_t copy_gc = xcb_generate_id(cconn);
+  uint32_t copy_gc_values[1] = { 0 };
+  xcb_create_gc(cconn, copy_gc, win, XCB_GC_GRAPHICS_EXPOSURES,
+                copy_gc_values);
+  xcb_pixmap_t back_pixmap = XCB_NONE;
+  cairo_surface_t *back_surface = NULL;
+  uint16_t back_w = 0;
+  uint16_t back_h = 0;
+
+  // Track applied geometry so the once-per-second clock update does not ask
+  // X11 to reconfigure an unchanged window and generate another expose cycle.
+  int16_t current_x = 0;
+  int16_t current_y = 0;
+  uint16_t current_w = 0;
+  uint16_t current_h = 0;
   xcb_flush(cconn);
 
   // Prepare a dummy cairo surface/context for text metrics (offscreen).
@@ -1175,15 +1195,25 @@ int main(int argc, char **argv) {
       anchor_position(anchor, mon.x, mon.y, mon.w, mon.h,
                       win_w, win_h, opt.margin_px, &new_x, &new_y);
 
-      uint32_t cfg[5];
+      uint32_t cfg[4];
       uint16_t mask = 0;
       int cidx = 0;
-      mask |= XCB_CONFIG_WINDOW_X;      cfg[cidx++] = (uint32_t)new_x;
-      mask |= XCB_CONFIG_WINDOW_Y;      cfg[cidx++] = (uint32_t)new_y;
-      mask |= XCB_CONFIG_WINDOW_WIDTH;  cfg[cidx++] = (uint32_t)win_w;
-      mask |= XCB_CONFIG_WINDOW_HEIGHT; cfg[cidx++] = (uint32_t)win_h;
-      mask |= XCB_CONFIG_WINDOW_STACK_MODE; cfg[cidx++] = XCB_STACK_MODE_ABOVE;
-      xcb_configure_window(cconn, win, mask, cfg);
+      if (new_x != current_x) {
+        mask |= XCB_CONFIG_WINDOW_X;
+        cfg[cidx++] = (uint32_t)new_x;
+      }
+      if (new_y != current_y) {
+        mask |= XCB_CONFIG_WINDOW_Y;
+        cfg[cidx++] = (uint32_t)new_y;
+      }
+      if (win_w != current_w) {
+        mask |= XCB_CONFIG_WINDOW_WIDTH;
+        cfg[cidx++] = (uint32_t)win_w;
+      }
+      if (win_h != current_h) {
+        mask |= XCB_CONFIG_WINDOW_HEIGHT;
+        cfg[cidx++] = (uint32_t)win_h;
+      }
 
       // Compute colors:
       // - Normal: use configured fg/bg.
@@ -1225,9 +1255,22 @@ int main(int argc, char **argv) {
                 (unsigned long long)flash_count);
       }
 
-      // Create drawing surface for this window size
-      cairo_surface_t *surface = cairo_xcb_surface_create(cconn, win, visual, win_w, win_h);
-      cairo_t *cr = cairo_create(surface);
+      if (!back_surface || back_w != win_w || back_h != win_h) {
+        // Reallocate only when content dimensions change; the pixmap remains
+        // reusable for ordinary datetime ticks.
+        if (back_surface) cairo_surface_destroy(back_surface);
+        if (back_pixmap != XCB_NONE) xcb_free_pixmap(cconn, back_pixmap);
+        back_pixmap = xcb_generate_id(cconn);
+        xcb_create_pixmap(cconn, screen->root_depth, back_pixmap, win,
+                          win_w, win_h);
+        back_surface = cairo_xcb_surface_create(cconn, back_pixmap, visual,
+                                                win_w, win_h);
+        back_w = win_w;
+        back_h = win_h;
+      }
+
+      // Render the whole frame off-screen before changing anything visible.
+      cairo_t *cr = cairo_create(back_surface);
 
       // Background
       cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
@@ -1263,9 +1306,21 @@ int main(int argc, char **argv) {
         cairo_paint(cr);
         cairo_restore(cr);
       }
-      cairo_surface_flush(surface);
       cairo_destroy(cr);
-      cairo_surface_destroy(surface);
+
+      // Flush Cairo's pixmap operations first, then place the complete frame
+      // in the window atomically from the X server's perspective. Geometry
+      // changes immediately precede the copy to minimize resize exposure.
+      cairo_surface_flush(back_surface);
+      if (mask != 0) {
+        xcb_configure_window(cconn, win, mask, cfg);
+        current_x = new_x;
+        current_y = new_y;
+        current_w = win_w;
+        current_h = win_h;
+      }
+      xcb_copy_area(cconn, back_pixmap, win, copy_gc,
+                    0, 0, 0, 0, win_w, win_h);
 
       xcb_flush(cconn);
       strncpy(last_str, dispbuf, sizeof(last_str)-1);
@@ -1278,6 +1333,9 @@ int main(int argc, char **argv) {
   free_text_lines(&text);
   cairo_destroy(measure_cr);
   cairo_surface_destroy(measure_surface);
+  if (back_surface) cairo_surface_destroy(back_surface);
+  if (back_pixmap != XCB_NONE) xcb_free_pixmap(cconn, back_pixmap);
+  xcb_free_gc(cconn, copy_gc);
   if (image_surface) cairo_surface_destroy(image_surface);
   xcb_disconnect(cconn);
   return 0;
