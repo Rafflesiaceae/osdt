@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <sys/inotify.h>
 
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -29,6 +30,7 @@ typedef struct {
   uint32_t margin_px;
   double fg_r, fg_g, fg_b;
   double bg_r, bg_g, bg_b;
+  const char *text_path;
   bool time_only;
   bool debug;
   int flash_minutes; // 0 disables
@@ -41,12 +43,17 @@ typedef struct {
   long last_boundary_min_epoch; // epoch minutes of last trigger
 } flash_state_t;
 
+typedef struct {
+  char **lines;
+  size_t count;
+} text_lines_t;
+
 static void print_help(const char *prog) {
   fprintf(stdout,
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -55,7 +62,8 @@ static void print_help(const char *prog) {
     "      --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).\n"
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 0).\n"
-    "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
+    "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
+    "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
     "  -c, --show-flash-count Append \"(N)\" with total flashes since start (N>0).\n"
     "  -d, --debug           Verbose debug logs to stderr.\n"
@@ -180,6 +188,62 @@ static void now_timestr(char *buf, size_t bufsz, bool time_only) {
   strftime(buf, bufsz, fmt, &lt);
 }
 
+static void free_text_lines(text_lines_t *t) {
+  if (!t) return;
+  for (size_t i = 0; i < t->count; ++i) {
+    free(t->lines[i]);
+  }
+  free(t->lines);
+  t->lines = NULL;
+  t->count = 0;
+}
+
+static bool load_text_lines(const char *path, text_lines_t *out) {
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    free_text_lines(out);
+    return false;
+  }
+
+  text_lines_t tmp = {0};
+  char *line = NULL;
+  size_t cap = 0;
+  ssize_t nread;
+  while ((nread = getline(&line, &cap, f)) != -1) {
+    size_t len = (size_t)nread;
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+      len--;
+    }
+    char *copy = (char *)malloc(len + 1);
+    if (!copy) {
+      free(line);
+      fclose(f);
+      free_text_lines(&tmp);
+      free_text_lines(out);
+      return false;
+    }
+    memcpy(copy, line, len);
+    copy[len] = '\0';
+    char **new_lines = (char **)realloc(tmp.lines, sizeof(char *) * (tmp.count + 1));
+    if (!new_lines) {
+      free(copy);
+      free(line);
+      fclose(f);
+      free_text_lines(&tmp);
+      free_text_lines(out);
+      return false;
+    }
+    tmp.lines = new_lines;
+    tmp.lines[tmp.count++] = copy;
+  }
+  free(line);
+  fclose(f);
+
+  free_text_lines(out);
+  *out = tmp;
+  return true;
+}
+
 static long ms_to_next_second(void) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
@@ -195,6 +259,7 @@ int main(int argc, char **argv) {
     .margin_px = 0,
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
+    .text_path = NULL,
     .time_only = false,
     .debug = false,
     .flash_minutes = 0,
@@ -208,7 +273,8 @@ int main(int argc, char **argv) {
     {"fg",        required_argument, 0,  1  },
     {"bg",        required_argument, 0,  2  },
     {"margin",    required_argument, 0, 'm'},
-    {"time-only", no_argument,       0, 't'},
+    {"text",      required_argument, 0, 't'},
+    {"time-only", no_argument,       0, 'T'},
     {"flash",     required_argument, 0, 'F'},
     {"show-flash-count", no_argument, 0, 'c'},
     {"debug",     no_argument,       0, 'd'},
@@ -216,13 +282,14 @@ int main(int argc, char **argv) {
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:tF:cd", long_opts, &idx)) != -1) {
+  while ((c = getopt_long(argc, argv, "hf:s:m:t:F:cdT", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
       case 's': opt.font_size_px = strtod(optarg, NULL); if (opt.font_size_px <= 0) opt.font_size_px = 16.0; break;
       case 'm': opt.margin_px = (uint32_t)strtoul(optarg, NULL, 10); break;
-      case 't': opt.time_only = true; break;
+      case 't': opt.text_path = optarg; break;
+      case 'T': opt.time_only = true; break;
       case 'F': {
           long v = strtol(optarg, NULL, 10);
           if (v < 0) v = 0;
@@ -245,9 +312,10 @@ int main(int argc, char **argv) {
   }
 
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
             opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
-            opt.show_flash_count, opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
+            opt.show_flash_count, opt.text_path ? opt.text_path : "",
+            opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
   int screen_num = 0;
@@ -338,12 +406,45 @@ int main(int argc, char **argv) {
   // sleep to next second to keep CPU minimal.
   int xfd = xcb_get_file_descriptor(cconn);
   char last_str[128] = {0};
+  text_lines_t text = {0};
+  int text_fd = -1;
+  int text_wd = -1;
+  const uint32_t text_watch_mask = IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB | IN_MOVED_TO | IN_CREATE;
+
+  if (opt.text_path) {
+    if (!load_text_lines(opt.text_path, &text) && opt.debug) {
+      fprintf(stderr, "[debug] failed to load text file \"%s\": %s\n",
+              opt.text_path, strerror(errno));
+    }
+    text_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (text_fd < 0) {
+      if (opt.debug) fprintf(stderr, "[debug] inotify_init1 failed: %s\n", strerror(errno));
+    } else {
+      text_wd = inotify_add_watch(text_fd, opt.text_path, text_watch_mask);
+      if (text_wd < 0 && opt.debug) {
+        fprintf(stderr, "[debug] inotify_add_watch failed for \"%s\": %s\n",
+                opt.text_path, strerror(errno));
+      }
+    }
+  }
 
   for (;;) {
+    if (opt.text_path && text_fd >= 0 && text_wd < 0) {
+      text_wd = inotify_add_watch(text_fd, opt.text_path, text_watch_mask);
+      if (text_wd >= 0 && opt.debug) {
+        fprintf(stderr, "[debug] inotify watch added for \"%s\"\n", opt.text_path);
+      }
+    }
+
     long timeout_ms = flash.active ? FLASH_STEP_MS : ms_to_next_second();
 
-    struct pollfd pfd = { .fd = xfd, .events = POLLIN };
-    int pr = poll(&pfd, 1, (int)timeout_ms);
+    struct pollfd pfds[2];
+    pfds[0].fd = xfd;
+    pfds[0].events = POLLIN;
+    pfds[1].fd = text_fd;
+    pfds[1].events = POLLIN;
+    int nfds = (text_fd >= 0) ? 2 : 1;
+    int pr = poll(pfds, nfds, (int)timeout_ms);
     if (pr < 0 && errno == EINTR) continue;
 
     bool need_redraw = false;
@@ -359,6 +460,33 @@ int main(int argc, char **argv) {
         need_redraw = true;
       }
       free(ev);
+    }
+
+    if (text_fd >= 0 && pfds[1].revents & POLLIN) {
+      char ibuf[4096];
+      ssize_t nread;
+      bool reload_text = false;
+      while ((nread = read(text_fd, ibuf, sizeof(ibuf))) > 0) {
+        size_t off = 0;
+        while (off < (size_t)nread) {
+          struct inotify_event *iev = (struct inotify_event *)(ibuf + off);
+          if (iev->mask & (IN_CLOSE_WRITE | IN_MODIFY | IN_MOVED_TO | IN_ATTRIB | IN_CREATE)) {
+            reload_text = true;
+          }
+          if (iev->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED)) {
+            text_wd = -1;
+            reload_text = true;
+          }
+          off += sizeof(struct inotify_event) + iev->len;
+        }
+      }
+      if (reload_text) {
+        if (!load_text_lines(opt.text_path, &text) && opt.debug) {
+          fprintf(stderr, "[debug] failed to reload text file \"%s\": %s\n",
+                  opt.text_path, strerror(errno));
+        }
+        need_redraw = true;
+      }
     }
 
     // Tick
@@ -414,13 +542,21 @@ int main(int argc, char **argv) {
       cairo_set_font_size(measure_cr, opt.font_size_px);
 
       cairo_text_extents_t te;
-      cairo_text_extents(measure_cr, dispbuf, &te);
-
       cairo_font_extents_t fe;
       cairo_font_extents(measure_cr, &fe);
 
-      int text_w = (int)(te.x_advance + 0.5);
-      int text_h = (int)(fe.ascent + fe.descent + 0.5);
+      double line_h = fe.ascent + fe.descent;
+      size_t total_lines = 1 + text.count;
+      int text_w = 0;
+      for (size_t i = 0; i < total_lines; ++i) {
+        const char *line = (i == 0) ? dispbuf : text.lines[i - 1];
+        cairo_text_extents(measure_cr, line, &te);
+        double line_wd = te.x_advance;
+        if (te.width > line_wd) line_wd = te.width;
+        int line_w = (int)(line_wd + 0.5);
+        if (line_w > text_w) text_w = line_w;
+      }
+      int text_h = (int)(line_h * (double)total_lines + 0.5);
 
       uint16_t pad = (uint16_t)(opt.margin_px);
       uint16_t win_w = (uint16_t)(text_w + pad * 2);
@@ -492,11 +628,14 @@ int main(int argc, char **argv) {
       cairo_set_font_size(cr, opt.font_size_px);
       cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
 
-      double text_x = pad - te.x_bearing;     // account for left bearing
-      double text_y = pad + fe.ascent;        // baseline
-
-      cairo_move_to(cr, text_x, text_y);
-      cairo_show_text(cr, dispbuf);
+      for (size_t i = 0; i < total_lines; ++i) {
+        const char *line = (i == 0) ? dispbuf : text.lines[i - 1];
+        cairo_text_extents(cr, line, &te);
+        double text_x = pad - te.x_bearing;     // account for left bearing
+        double text_y = pad + fe.ascent + (double)i * line_h; // baseline
+        cairo_move_to(cr, text_x, text_y);
+        cairo_show_text(cr, line);
+      }
       cairo_surface_flush(surface);
       cairo_destroy(cr);
       cairo_surface_destroy(surface);
