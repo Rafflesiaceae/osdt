@@ -31,6 +31,7 @@ typedef struct {
   double fg_r, fg_g, fg_b;
   double bg_r, bg_g, bg_b;
   const char *text_path;
+  const char *anchor;
   bool time_only;
   bool debug;
   int flash_minutes; // 0 disables
@@ -48,12 +49,24 @@ typedef struct {
   size_t count;
 } text_lines_t;
 
+typedef enum {
+  ANCHOR_TOP,
+  ANCHOR_TOP_LEFT,
+  ANCHOR_TOP_RIGHT,
+  ANCHOR_RIGHT,
+  ANCHOR_BOTTOM_RIGHT,
+  ANCHOR_BOTTOM,
+  ANCHOR_BOTTOM_LEFT,
+  ANCHOR_LEFT,
+  ANCHOR_INVALID
+} anchor_t;
+
 static void print_help(const char *prog) {
   fprintf(stdout,
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -62,6 +75,8 @@ static void print_help(const char *prog) {
     "      --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).\n"
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 0).\n"
+    "  -a, --anchor POS      Anchor position: top, top-left, top-right, right,\n"
+    "                       bottom-right, bottom, bottom-left, left (default: top-right).\n"
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
     "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
@@ -188,6 +203,63 @@ static void now_timestr(char *buf, size_t bufsz, bool time_only) {
   strftime(buf, bufsz, fmt, &lt);
 }
 
+static anchor_t parse_anchor(const char *s) {
+  if (!s) return ANCHOR_INVALID;
+  if (strcmp(s, "top") == 0) return ANCHOR_TOP;
+  if (strcmp(s, "top-left") == 0) return ANCHOR_TOP_LEFT;
+  if (strcmp(s, "top-right") == 0) return ANCHOR_TOP_RIGHT;
+  if (strcmp(s, "right") == 0) return ANCHOR_RIGHT;
+  if (strcmp(s, "bottom-right") == 0) return ANCHOR_BOTTOM_RIGHT;
+  if (strcmp(s, "bottom") == 0) return ANCHOR_BOTTOM;
+  if (strcmp(s, "bottom-left") == 0) return ANCHOR_BOTTOM_LEFT;
+  if (strcmp(s, "left") == 0) return ANCHOR_LEFT;
+  return ANCHOR_INVALID;
+}
+
+static void anchor_position(anchor_t anchor, int screen_w, int screen_h,
+                            uint16_t win_w, uint16_t win_h, uint32_t margin_px,
+                            int16_t *out_x, int16_t *out_y) {
+  int x = 0;
+  int y = 0;
+  switch (anchor) {
+    case ANCHOR_TOP:
+      x = (screen_w - (int)win_w) / 2;
+      y = (int)margin_px;
+      break;
+    case ANCHOR_TOP_LEFT:
+      x = (int)margin_px;
+      y = (int)margin_px;
+      break;
+    case ANCHOR_RIGHT:
+      x = screen_w - (int)win_w - (int)margin_px;
+      y = (screen_h - (int)win_h) / 2;
+      break;
+    case ANCHOR_BOTTOM_RIGHT:
+      x = screen_w - (int)win_w - (int)margin_px;
+      y = screen_h - (int)win_h - (int)margin_px;
+      break;
+    case ANCHOR_BOTTOM:
+      x = (screen_w - (int)win_w) / 2;
+      y = screen_h - (int)win_h - (int)margin_px;
+      break;
+    case ANCHOR_BOTTOM_LEFT:
+      x = (int)margin_px;
+      y = screen_h - (int)win_h - (int)margin_px;
+      break;
+    case ANCHOR_LEFT:
+      x = (int)margin_px;
+      y = (screen_h - (int)win_h) / 2;
+      break;
+    case ANCHOR_TOP_RIGHT:
+    default:
+      x = screen_w - (int)win_w - (int)margin_px;
+      y = (int)margin_px;
+      break;
+  }
+  *out_x = (int16_t)x;
+  *out_y = (int16_t)y;
+}
+
 static void free_text_lines(text_lines_t *t) {
   if (!t) return;
   for (size_t i = 0; i < t->count; ++i) {
@@ -260,6 +332,7 @@ int main(int argc, char **argv) {
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .text_path = NULL,
+    .anchor = "top-right",
     .time_only = false,
     .debug = false,
     .flash_minutes = 0,
@@ -273,6 +346,7 @@ int main(int argc, char **argv) {
     {"fg",        required_argument, 0,  1  },
     {"bg",        required_argument, 0,  2  },
     {"margin",    required_argument, 0, 'm'},
+    {"anchor",    required_argument, 0, 'a'},
     {"text",      required_argument, 0, 't'},
     {"time-only", no_argument,       0, 'T'},
     {"flash",     required_argument, 0, 'F'},
@@ -282,12 +356,13 @@ int main(int argc, char **argv) {
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:t:F:cdT", long_opts, &idx)) != -1) {
+  while ((c = getopt_long(argc, argv, "hf:s:m:a:t:F:cdT", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
       case 's': opt.font_size_px = strtod(optarg, NULL); if (opt.font_size_px <= 0) opt.font_size_px = 16.0; break;
       case 'm': opt.margin_px = (uint32_t)strtoul(optarg, NULL, 10); break;
+      case 'a': opt.anchor = optarg; break;
       case 't': opt.text_path = optarg; break;
       case 'T': opt.time_only = true; break;
       case 'F': {
@@ -311,10 +386,16 @@ int main(int argc, char **argv) {
     }
   }
 
+  anchor_t anchor = parse_anchor(opt.anchor);
+  if (anchor == ANCHOR_INVALID) {
+    fprintf(stderr, "Invalid --anchor value \"%s\"\n", opt.anchor ? opt.anchor : "");
+    return 2;
+  }
+
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
             opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
-            opt.show_flash_count, opt.text_path ? opt.text_path : "",
+            opt.show_flash_count, opt.text_path ? opt.text_path : "", opt.anchor ? opt.anchor : "",
             opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
@@ -360,7 +441,7 @@ int main(int argc, char **argv) {
     XCB_COPY_FROM_PARENT,              // depth
     win,
     screen->root,
-    screen->width_in_pixels - w - opt.margin_px, // x
+    screen->width_in_pixels - w - opt.margin_px, // x (placeholder; updated after measure)
     opt.margin_px,                              // y
     w, h,
     0,                                // border
@@ -562,8 +643,10 @@ int main(int argc, char **argv) {
       uint16_t win_w = (uint16_t)(text_w + pad * 2);
       uint16_t win_h = (uint16_t)(text_h + pad * 2);
 
-      int16_t new_x = (int16_t)((int)screen->width_in_pixels - (int)win_w - (int)opt.margin_px);
-      int16_t new_y = (int16_t)opt.margin_px;
+      int16_t new_x = 0;
+      int16_t new_y = 0;
+      anchor_position(anchor, (int)screen->width_in_pixels, (int)screen->height_in_pixels,
+                      win_w, win_h, opt.margin_px, &new_x, &new_y);
 
       uint32_t cfg[5];
       uint16_t mask = 0;
