@@ -21,6 +21,7 @@
 #include <cairo/cairo-xcb.h>
 
 #define FLASH_DURATION_SEC 30
+#define FLASH_STEP_MS 50
 
 typedef struct {
   const char *font_family;
@@ -36,7 +37,7 @@ typedef struct {
 typedef struct {
   bool active;
   time_t start;
-  time_t next;
+  long last_boundary_min_epoch; // epoch minutes of last trigger
 } flash_state_t;
 
 static void print_help(const char *prog) {
@@ -54,12 +55,12 @@ static void print_help(const char *prog) {
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 8).\n"
     "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
-    "  -F, --flash MIN       Flash (invert then fade) every MIN minutes. 0=off.\n"
+    "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
     "  -d, --debug           Verbose debug logs to stderr.\n"
     "  -h, --help            Show this help and exit.\n"
     "\n"
     "Example:\n"
-    "  %s --time-only --flash 5 --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
+    "  %s --time-only --flash 1 --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
     prog, prog, prog
   );
 }
@@ -182,24 +183,6 @@ static long ms_to_next_second(void) {
   long ms = ts.tv_nsec / 1000000L;
   long rem = 1000L - (ms % 1000L);
   return (rem == 1000L) ? 0L : rem;
-}
-
-static time_t schedule_first_flash(int flash_minutes, bool debug) {
-  if (flash_minutes <= 0) return (time_t)0;
-  time_t now = time(NULL);
-  struct tm lt;
-  localtime_r(&now, &lt);
-  int m = lt.tm_min;
-  int s = lt.tm_sec;
-  int mod = m % flash_minutes;
-  int delta_min = (mod == 0 && s == 0) ? flash_minutes : ((flash_minutes - mod) % flash_minutes);
-  int delta_sec = delta_min * 60 - s;
-  time_t next = now + (delta_sec <= 0 ? flash_minutes * 60 : delta_sec);
-  if (debug) {
-    fprintf(stderr, "[debug] flash schedule: now=%ld m=%d s=%d -> next=%ld (in %d sec)\n",
-            (long)now, m, s, (long)next, (int)(next - now));
-  }
-  return next;
 }
 
 int main(int argc, char **argv) {
@@ -341,18 +324,19 @@ int main(int argc, char **argv) {
   cairo_select_font_face(measure_cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(measure_cr, opt.font_size_px);
 
-  // Flash state
-  flash_state_t flash = { .active = false, .start = 0, .next = 0 };
-  if (opt.flash_minutes > 0) {
-    flash.next = schedule_first_flash(opt.flash_minutes, opt.debug);
-  }
+  // Flash state (boundary-aligned)
+  flash_state_t flash = { .active = false, .start = 0, .last_boundary_min_epoch = -1 };
 
-  // Main loop: poll X for events, and redraw exactly each second.
+  // Main loop: poll X for events. During flash, update every 50ms; otherwise,
+  // sleep to next second to keep CPU minimal.
   int xfd = xcb_get_file_descriptor(cconn);
   char last_str[64] = {0};
 
   for (;;) {
-    long timeout_ms = ms_to_next_second();
+    long sec_wait = ms_to_next_second();
+    long timeout_ms = flash.active ? (FLASH_STEP_MS < sec_wait ? FLASH_STEP_MS : sec_wait)
+                                   : sec_wait;
+
     struct pollfd pfd = { .fd = xfd, .events = POLLIN };
     int pr = poll(&pfd, 1, (int)timeout_ms);
     if (pr < 0 && errno == EINTR) continue;
@@ -379,16 +363,21 @@ int main(int argc, char **argv) {
 
     if (need_redraw) {
       time_t now = time(NULL);
+      struct tm lt;
+      localtime_r(&now, &lt);
 
-      // Handle flash scheduling and lifecycle
+      // Boundary-aligned flash trigger: minute % flash_minutes == 0 at sec 00
       if (opt.flash_minutes > 0) {
-        if (!flash.active && flash.next != 0 && now >= flash.next) {
-          flash.active = true;
-          flash.start = now;
-          flash.next += opt.flash_minutes * 60;
-          if (opt.debug) {
-            fprintf(stderr, "[debug] flash start: start=%ld next=%ld\n",
-                    (long)flash.start, (long)flash.next);
+        long epoch_min = (long)(now / 60);
+        if (!flash.active && lt.tm_sec == 0 && (lt.tm_min % opt.flash_minutes) == 0) {
+          if (flash.last_boundary_min_epoch != epoch_min) {
+            flash.active = true;
+            flash.start = now;
+            flash.last_boundary_min_epoch = epoch_min;
+            if (opt.debug) {
+              fprintf(stderr, "[debug] flash start: epoch_min=%ld (time %02d:%02d)\n",
+                      epoch_min, lt.tm_hour, lt.tm_min);
+            }
           }
         }
         if (flash.active) {
@@ -433,13 +422,13 @@ int main(int argc, char **argv) {
       mask |= XCB_CONFIG_WINDOW_STACK_MODE; cfg[cidx++] = XCB_STACK_MODE_ABOVE;
       xcb_configure_window(cconn, win, mask, cfg);
 
-      // Compute colors (with optional flash fade)
+      // Compute colors (with optional flash fade, 50ms steps)
       double fg_r = opt.fg_r, fg_g = opt.fg_g, fg_b = opt.fg_b;
       double bg_r = opt.bg_r, bg_g = opt.bg_g, bg_b = opt.bg_b;
 
       if (flash.active) {
         double elapsed = difftime(now, flash.start);
-        double p = elapsed / (double)FLASH_DURATION_SEC;
+        double p = elapsed / (double)FLASH_DURATION_SEC; // 0 -> 1
         if (p < 0.0) p = 0.0; if (p > 1.0) p = 1.0;
 
         double inv_fg_r = 1.0 - opt.fg_r, inv_fg_g = 1.0 - opt.fg_g, inv_fg_b = 1.0 - opt.fg_b;
@@ -460,8 +449,8 @@ int main(int argc, char **argv) {
       }
 
       if (opt.debug) {
-        fprintf(stderr, "[debug] tick str=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d)\n",
-                nowbuf, text_w, text_h, win_w, win_h, new_x, new_y);
+        fprintf(stderr, "[debug] tick str=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d) flash=%d\n",
+                nowbuf, text_w, text_h, win_w, win_h, new_x, new_y, flash.active);
       }
 
       // Create drawing surface for this window size

@@ -15,8 +15,9 @@ Features
 - Configurable font family, font size (px), foreground and background colors.
 - **New:** ``--time-only`` to show ``HH:MM:SS`` (no date).
 - **New:** ``--debug`` adds verbose diagnostics to stderr.
-- **New:** ``--flash MIN`` inverts colors every MIN minutes and fades back
-  to normal over 30 seconds.
+- **New:** ``--flash MIN`` inverts colors when ``minute % MIN == 0`` and
+  ``second == 0``, then smoothly fades back to normal over 30 seconds with
+  50ms color updates (no startup timer; boundary-aligned).
 
 Build
 -----
@@ -37,7 +38,7 @@ Then build and run::
   meson setup build
   meson compile -C build
   ./build/x11-datetime-overlay --time-only --font "DejaVu Sans Mono" \
-    --size 18 --fg #EAEAEA --bg #101010 --margin 10 --flash 5
+    --size 18 --fg #EAEAEA --bg #101010 --margin 10 --flash 1
 
 Usage
 -----
@@ -53,7 +54,8 @@ Options:
       --bg  #RRGGBB     Background color (default: #000000).
   -m, --margin PX       Outer margin (default: 8).
   -t, --time-only       Show only time (HH:MM:SS), omit the date.
-  -F, --flash MIN       Flash (invert then fade) every MIN minutes. Disabled if 0.
+  -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
+                        (minute % MIN == 0) at second 00. Disabled if 0.
   -d, --debug           Verbose debug logs to stderr (window geometry, events).
   -h, --help            Show help.
 
@@ -75,4 +77,5 @@ Performance
 -----------
 The program wakes up only once per second, measures and repaints the single
 line of text, and uses Cairo's xcb backend for efficient text rendering.
-Memory footprint is minimal; CPU/GPU usage is effectively near-zero.
+During a flash fade, colors update every 50ms for smoothness. Memory
+footprint is minimal; CPU/GPU usage stays low.
