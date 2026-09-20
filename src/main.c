@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <poll.h>
+#include <fcntl.h>
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
@@ -52,6 +53,13 @@ typedef struct {
   size_t count;
 } text_lines_t;
 
+typedef struct {
+  char *buf;
+  size_t len;
+  size_t cap;
+  bool open;
+} stdin_text_t;
+
 typedef enum {
   ANCHOR_TOP,
   ANCHOR_TOP_LEFT,
@@ -89,7 +97,8 @@ static void print_help(const char *prog) {
     "  -a, --anchor POS      Anchor position: top, top-left, top-right, right,\n"
     "                       bottom-right, bottom, bottom-left, left (default: top-right).\n"
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
-    "                       Use '-' to read text from stdin once; piped stdin is auto-read.\n"
+    "                       Use '-' to read text from stdin; piped stdin is auto-read.\n"
+    "                       A zero byte refreshes stdin text with the frame so far.\n"
     "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "      --no-datetime     Do not show the date or time; display only text input.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
@@ -284,6 +293,56 @@ static void free_text_lines(text_lines_t *t) {
   t->count = 0;
 }
 
+static bool append_text_line(text_lines_t *t, const char *line, size_t len) {
+  char *copy = (char *)malloc(len + 1);
+  if (!copy) {
+    return false;
+  }
+  memcpy(copy, line, len);
+  copy[len] = '\0';
+
+  char **new_lines = (char **)realloc(t->lines, sizeof(char *) * (t->count + 1));
+  if (!new_lines) {
+    free(copy);
+    return false;
+  }
+
+  t->lines = new_lines;
+  t->lines[t->count++] = copy;
+  return true;
+}
+
+static bool load_text_lines_buffer(const char *buf, size_t len, text_lines_t *out) {
+  text_lines_t tmp = {0};
+  size_t start = 0;
+
+  // Convert an in-memory stdin frame to the same line model used by file
+  // input, trimming CRLF/LF terminators before rendering.
+  while (start < len) {
+    size_t end = start;
+    while (end < len && buf[end] != '\n') {
+      end++;
+    }
+
+    size_t line_len = end - start;
+    while (line_len > 0 && buf[start + line_len - 1] == '\r') {
+      line_len--;
+    }
+
+    if (!append_text_line(&tmp, buf + start, line_len)) {
+      free_text_lines(&tmp);
+      free_text_lines(out);
+      return false;
+    }
+
+    start = (end < len) ? end + 1 : end;
+  }
+
+  free_text_lines(out);
+  *out = tmp;
+  return true;
+}
+
 static bool load_text_lines_stream(FILE *f, text_lines_t *out) {
   text_lines_t tmp = {0};
   char *line = NULL;
@@ -297,27 +356,12 @@ static bool load_text_lines_stream(FILE *f, text_lines_t *out) {
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
       len--;
     }
-    char *copy = (char *)malloc(len + 1);
-    if (!copy) {
+    if (!append_text_line(&tmp, line, len)) {
       free(line);
-      fclose(f);
       free_text_lines(&tmp);
       free_text_lines(out);
       return false;
     }
-    memcpy(copy, line, len);
-    copy[len] = '\0';
-    char **new_lines = (char **)realloc(tmp.lines, sizeof(char *) * (tmp.count + 1));
-    if (!new_lines) {
-      free(copy);
-      free(line);
-      fclose(f);
-      free_text_lines(&tmp);
-      free_text_lines(out);
-      return false;
-    }
-    tmp.lines = new_lines;
-    tmp.lines[tmp.count++] = copy;
   }
   free(line);
 
@@ -336,6 +380,110 @@ static bool load_text_lines(const char *path, text_lines_t *out) {
   bool ok = load_text_lines_stream(f, out);
   fclose(f);
   return ok;
+}
+
+static void free_stdin_text(stdin_text_t *s) {
+  if (!s) return;
+  free(s->buf);
+  s->buf = NULL;
+  s->len = 0;
+  s->cap = 0;
+  s->open = false;
+}
+
+static bool append_stdin_text(stdin_text_t *s, const char *buf, size_t len) {
+  if (len == 0) {
+    return true;
+  }
+  if (s->len > SIZE_MAX - len) {
+    errno = ENOMEM;
+    return false;
+  }
+
+  size_t need = s->len + len;
+  if (need > s->cap) {
+    size_t new_cap = s->cap ? s->cap : 4096;
+    while (new_cap < need) {
+      if (new_cap > SIZE_MAX / 2) {
+        new_cap = need;
+        break;
+      }
+      new_cap *= 2;
+    }
+
+    char *new_buf = (char *)realloc(s->buf, new_cap);
+    if (!new_buf) {
+      return false;
+    }
+    s->buf = new_buf;
+    s->cap = new_cap;
+  }
+
+  memcpy(s->buf + s->len, buf, len);
+  s->len += len;
+  return true;
+}
+
+static bool publish_stdin_text(stdin_text_t *s, text_lines_t *out) {
+  bool ok = load_text_lines_buffer(s->buf, s->len, out);
+  s->len = 0;
+  return ok;
+}
+
+static bool process_stdin_text(stdin_text_t *s, const char *buf, size_t len,
+                               text_lines_t *out, bool *updated) {
+  size_t start = 0;
+
+  // A zero byte is a frame boundary: render everything received since the
+  // previous boundary, then collect the next update from a fresh buffer.
+  for (size_t i = 0; i < len; ++i) {
+    if (buf[i] != '\0') {
+      continue;
+    }
+    if (!append_stdin_text(s, buf + start, i - start)) {
+      return false;
+    }
+    if (!publish_stdin_text(s, out)) {
+      return false;
+    }
+    *updated = true;
+    start = i + 1;
+  }
+
+  return append_stdin_text(s, buf + start, len - start);
+}
+
+static bool drain_stdin_text(stdin_text_t *s, text_lines_t *out, bool *updated) {
+  char buf[4096];
+
+  while (s->open) {
+    ssize_t nread = read(STDIN_FILENO, buf, sizeof(buf));
+    if (nread > 0) {
+      if (!process_stdin_text(s, buf, (size_t)nread, out, updated)) {
+        return false;
+      }
+      continue;
+    }
+    if (nread == 0) {
+      s->open = false;
+      if (s->len > 0) {
+        if (!publish_stdin_text(s, out)) {
+          return false;
+        }
+        *updated = true;
+      }
+      return true;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return true;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    return false;
+  }
+
+  return true;
 }
 
 static bool get_pointer_xy(xcb_connection_t *c, xcb_window_t root, int *x, int *y) {
@@ -605,13 +753,20 @@ int main(int argc, char **argv) {
   int xfd = xcb_get_file_descriptor(cconn);
   char last_str[128] = {0};
   text_lines_t text = {0};
+  stdin_text_t stdin_text = {0};
   int text_fd = -1;
   int text_wd = -1;
   const uint32_t text_watch_mask = IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB | IN_MOVED_TO | IN_CREATE;
 
   if (opt.text_from_stdin) {
-    if (!load_text_lines_stream(stdin, &text) && opt.debug) {
-      fprintf(stderr, "[debug] failed to load text from stdin: %s\n", strerror(errno));
+    stdin_text.open = true;
+    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (stdin_flags < 0) {
+      if (opt.debug) fprintf(stderr, "[debug] fcntl(F_GETFL) failed for stdin: %s\n", strerror(errno));
+      stdin_text.open = false;
+    } else if (fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) < 0) {
+      if (opt.debug) fprintf(stderr, "[debug] fcntl(F_SETFL) failed for stdin: %s\n", strerror(errno));
+      stdin_text.open = false;
     }
   } else if (opt.text_path) {
     if (!load_text_lines(opt.text_path, &text) && opt.debug) {
@@ -640,12 +795,30 @@ int main(int argc, char **argv) {
 
     long timeout_ms = flash.active ? FLASH_STEP_MS : ms_to_next_second();
 
-    struct pollfd pfds[2];
+    struct pollfd pfds[3];
+    int nfds = 0;
+    int text_poll_idx = -1;
+    int stdin_poll_idx = -1;
+
     pfds[0].fd = xfd;
     pfds[0].events = POLLIN;
-    pfds[1].fd = text_fd;
-    pfds[1].events = POLLIN;
-    int nfds = (text_fd >= 0) ? 2 : 1;
+    pfds[0].revents = 0;
+    nfds++;
+    if (text_fd >= 0) {
+      text_poll_idx = nfds;
+      pfds[nfds].fd = text_fd;
+      pfds[nfds].events = POLLIN;
+      pfds[nfds].revents = 0;
+      nfds++;
+    }
+    if (stdin_text.open) {
+      stdin_poll_idx = nfds;
+      pfds[nfds].fd = STDIN_FILENO;
+      pfds[nfds].events = POLLIN | POLLHUP | POLLERR;
+      pfds[nfds].revents = 0;
+      nfds++;
+    }
+
     int pr = poll(pfds, nfds, (int)timeout_ms);
     if (pr < 0 && errno == EINTR) continue;
 
@@ -664,7 +837,18 @@ int main(int argc, char **argv) {
       free(ev);
     }
 
-    if (text_fd >= 0 && pfds[1].revents & POLLIN) {
+    if (stdin_poll_idx >= 0 && (pfds[stdin_poll_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+      bool stdin_updated = false;
+      if (!drain_stdin_text(&stdin_text, &text, &stdin_updated)) {
+        if (opt.debug) fprintf(stderr, "[debug] failed to read text from stdin: %s\n", strerror(errno));
+        stdin_text.open = false;
+      }
+      if (stdin_updated) {
+        need_redraw = true;
+      }
+    }
+
+    if (text_poll_idx >= 0 && pfds[text_poll_idx].revents & POLLIN) {
       char ibuf[4096];
       ssize_t nread;
       bool reload_text = false;
@@ -864,6 +1048,8 @@ int main(int argc, char **argv) {
   }
 
   // Unreachable in normal usage; kept for completeness
+  free_stdin_text(&stdin_text);
+  free_text_lines(&text);
   cairo_destroy(measure_cr);
   cairo_surface_destroy(measure_surface);
   xcb_disconnect(cconn);

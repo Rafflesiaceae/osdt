@@ -25,7 +25,9 @@ Features
 - **New:** ``--show-flash-count`` appends ``(N)`` with the number of flashes
   since program start (only shown when ``N > 0``).
 - ``--text FILE`` can display extra lines below the clock, and stdin is
-  accepted either with ``--text -`` or by piping text into ``osdt``.
+  accepted either with ``--text -`` or by piping text into ``osdt``. While
+  stdin is open, writing a zero byte publishes the frame written so far and
+  starts the next realtime update frame.
 
 Build
 -----
@@ -65,8 +67,9 @@ Options:
   -a, --anchor POS      Anchor position: top, top-left, top-right, right,
                         bottom-right, bottom, bottom-left, left.
   -t, --text FILE       Show file contents below the time; watches for changes.
-                        Use "-" to read text from stdin once; piped stdin is
-                        auto-read when --text is not set.
+                        Use "-" to read text from stdin; piped stdin is
+                        auto-read when --text is not set. A zero byte
+                        refreshes stdin text with the frame so far.
   -T, --time-only       Show only time (HH:MM:SS), omit the date.
       --no-datetime     Do not show the date or time; display only text input.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
@@ -79,6 +82,7 @@ Options:
 Stdin examples::
 
   printf 'Build finished\nWarnings: 0\n' | osdt --no-datetime
+  while true; do printf 'CPU: %s%%\0' "$(top -bn1 | awk '/Cpu/ {print $2}')"; sleep 1; done | osdt --no-datetime
   osdt --text - --anchor bottom-right < status.txt
 
 Notes on Window Behavior
