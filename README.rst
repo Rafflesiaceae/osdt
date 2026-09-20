@@ -1,0 +1,71 @@
+x11-datetime-overlay
+====================
+
+Tiny, always-on-top, top-right datetime overlay for X11, written in pure C
+using XCB for windowing and Cairo (xcb backend) for text rendering. Designed
+for ultra-low CPU/GPU usage: it only redraws once per second and uses a
+click-through override-redirect window, so it never steals focus.
+
+Features
+--------
+- Always-on-top, on all workspaces (EWMH hints + override-redirect).
+- Stays visible even with fullscreen windows in i3 and many WMs.
+- Top-right anchored; auto-sizes to the text and repositions each second.
+- Click-through (no input), so it never interferes with your workflow.
+- Configurable font family, font size (px), foreground and background colors.
+- Minimal resource usage; no timers spinning—sleeps until the next second.
+
+Build
+-----
+You need the development packages for XCB, XCB-Shape, and Cairo:
+
+Debian/Ubuntu::
+
+  sudo apt install build-essential meson ninja-build pkg-config \
+       libxcb1-dev libxcb-shape0-dev libcairo2-dev
+
+Fedora::
+
+  sudo dnf install meson ninja-build pkgconf-pkg-config \
+       libxcb-devel xcb-util-wm-devel cairo-devel
+
+Then build and run::
+
+  meson setup build
+  meson compile -C build
+  ./build/x11-datetime-overlay --font "DejaVu Sans Mono" --size 18 --fg #EAEAEA --bg #101010 --margin 10
+
+Usage
+-----
+::
+
+  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX]
+  x11-datetime-overlay -h | --help
+
+Options:
+  -f, --font FAMILY     Font family name (default: "DejaVu Sans Mono").
+  -s, --size PX         Font size in pixels (default: 16).
+      --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).
+      --bg  #RRGGBB     Background color (default: #000000).
+  -m, --margin PX       Outer margin (default: 8).
+  -h, --help            Show help.
+
+Notes on Window Behavior
+------------------------
+- The program creates an override-redirect window. This bypasses the window
+  manager so the overlay is not reparented, is placed above managed windows,
+  and appears on all workspaces. EWMH hints (``_NET_WM_STATE_ABOVE``,
+  ``_NET_WM_STATE_STICKY``, ``_NET_WM_WINDOW_TYPE_DOCK``, and
+  ``_NET_WM_DESKTOP=0xFFFFFFFF``) are set as best-effort hints to maximize
+  compatibility across WMs.
+
+- On i3 (and many tiling WMs), override-redirect windows typically remain
+  visible even when another window is fullscreen. Some compositors or WM
+  configurations may still choose to cover such windows; if so, ensure no
+  rules explicitly block override-redirect/dock windows or force them below.
+
+Performance
+-----------
+The program wakes up only once per second, measures and repaints the single
+line of text, and uses Cairo's xcb backend for efficient text rendering.
+Memory footprint is minimal; CPU/GPU usage is effectively near-zero.
