@@ -94,6 +94,7 @@ static bool parse_rgb_hex(const char *hex, double *r, double *g, double *b) {
 }
 
 static xcb_visualtype_t *get_visualtype_for_screen(const xcb_setup_t *setup, xcb_screen_t *screen) {
+  (void)setup; // silence unused parameter warning
   xcb_depth_iterator_t di = xcb_screen_allowed_depths_iterator(screen);
   for (; di.rem; xcb_depth_next(&di)) {
     xcb_visualtype_iterator_t vi = xcb_depth_visuals_iterator(di.data);
@@ -430,7 +431,13 @@ int main(int argc, char **argv) {
       if (flash.active) {
         double elapsed = difftime(now, flash.start);
         double p = elapsed / (double)FLASH_DURATION_SEC; // 0 -> 1
-        if (p < 0.0) p = 0.0; if (p > 1.0) p = 1.0;
+        if (p < 0.0) {
+          if (opt.debug) fprintf(stderr, "[debug] clamp p<0: %.6f\n", p);
+          p = 0.0;
+        } else if (p > 1.0) {
+          if (opt.debug) fprintf(stderr, "[debug] clamp p>1: %.6f\n", p);
+          p = 1.0;
+        }
 
         double inv_bg_r = 1.0 - opt.bg_r, inv_bg_g = 1.0 - opt.bg_g, inv_bg_b = 1.0 - opt.bg_b;
 
