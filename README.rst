@@ -15,6 +15,8 @@ Features
 - Configurable font family, font size (px), foreground and background colors.
 - **New:** ``--time-only`` to show ``HH:MM:SS`` (no date).
 - **New:** ``--debug`` adds verbose diagnostics to stderr.
+- **New:** ``--flash MIN`` inverts colors every MIN minutes and fades back
+  to normal over 30 seconds.
 
 Build
 -----
@@ -35,13 +37,13 @@ Then build and run::
   meson setup build
   meson compile -C build
   ./build/x11-datetime-overlay --time-only --font "DejaVu Sans Mono" \
-    --size 18 --fg #EAEAEA --bg #101010 --margin 10
+    --size 18 --fg #EAEAEA --bg #101010 --margin 10 --flash 5
 
 Usage
 -----
 ::
 
-  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--debug]
+  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--debug]
   x11-datetime-overlay -h | --help
 
 Options:
@@ -51,6 +53,7 @@ Options:
       --bg  #RRGGBB     Background color (default: #000000).
   -m, --margin PX       Outer margin (default: 8).
   -t, --time-only       Show only time (HH:MM:SS), omit the date.
+  -F, --flash MIN       Flash (invert then fade) every MIN minutes. Disabled if 0.
   -d, --debug           Verbose debug logs to stderr (window geometry, events).
   -h, --help            Show help.
 

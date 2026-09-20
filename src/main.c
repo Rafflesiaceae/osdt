@@ -20,6 +20,8 @@
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
 
+#define FLASH_DURATION_SEC 30
+
 typedef struct {
   const char *font_family;
   double font_size_px;
@@ -28,14 +30,21 @@ typedef struct {
   double bg_r, bg_g, bg_b;
   bool time_only;
   bool debug;
+  int flash_minutes; // 0 disables
 } options_t;
+
+typedef struct {
+  bool active;
+  time_t start;
+  time_t next;
+} flash_state_t;
 
 static void print_help(const char *prog) {
   fprintf(stdout,
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -45,11 +54,12 @@ static void print_help(const char *prog) {
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 8).\n"
     "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
+    "  -F, --flash MIN       Flash (invert then fade) every MIN minutes. 0=off.\n"
     "  -d, --debug           Verbose debug logs to stderr.\n"
     "  -h, --help            Show this help and exit.\n"
     "\n"
     "Example:\n"
-    "  %s --time-only --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
+    "  %s --time-only --flash 5 --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
     prog, prog, prog
   );
 }
@@ -174,6 +184,24 @@ static long ms_to_next_second(void) {
   return (rem == 1000L) ? 0L : rem;
 }
 
+static time_t schedule_first_flash(int flash_minutes, bool debug) {
+  if (flash_minutes <= 0) return (time_t)0;
+  time_t now = time(NULL);
+  struct tm lt;
+  localtime_r(&now, &lt);
+  int m = lt.tm_min;
+  int s = lt.tm_sec;
+  int mod = m % flash_minutes;
+  int delta_min = (mod == 0 && s == 0) ? flash_minutes : ((flash_minutes - mod) % flash_minutes);
+  int delta_sec = delta_min * 60 - s;
+  time_t next = now + (delta_sec <= 0 ? flash_minutes * 60 : delta_sec);
+  if (debug) {
+    fprintf(stderr, "[debug] flash schedule: now=%ld m=%d s=%d -> next=%ld (in %d sec)\n",
+            (long)now, m, s, (long)next, (int)(next - now));
+  }
+  return next;
+}
+
 int main(int argc, char **argv) {
   options_t opt = {
     .font_family = "DejaVu Sans Mono",
@@ -182,7 +210,8 @@ int main(int argc, char **argv) {
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .time_only = false,
-    .debug = false
+    .debug = false,
+    .flash_minutes = 0
   };
 
   static struct option long_opts[] = {
@@ -193,18 +222,24 @@ int main(int argc, char **argv) {
     {"bg",        required_argument, 0,  2  },
     {"margin",    required_argument, 0, 'm'},
     {"time-only", no_argument,       0, 't'},
+    {"flash",     required_argument, 0, 'F'},
     {"debug",     no_argument,       0, 'd'},
     {0,0,0,0}
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:td", long_opts, &idx)) != -1) {
+  while ((c = getopt_long(argc, argv, "hf:s:m:tF:d", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
       case 's': opt.font_size_px = strtod(optarg, NULL); if (opt.font_size_px <= 0) opt.font_size_px = 16.0; break;
       case 'm': opt.margin_px = (uint32_t)strtoul(optarg, NULL, 10); break;
       case 't': opt.time_only = true; break;
+      case 'F': {
+          long v = strtol(optarg, NULL, 10);
+          if (v < 0) v = 0;
+          opt.flash_minutes = (int)v;
+        } break;
       case 'd': opt.debug = true; break;
       case 1:
         if (!parse_rgb_hex(optarg, &opt.fg_r, &opt.fg_g, &opt.fg_b)) {
@@ -221,8 +256,8 @@ int main(int argc, char **argv) {
   }
 
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
-            opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only,
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+            opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
             opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
@@ -306,6 +341,12 @@ int main(int argc, char **argv) {
   cairo_select_font_face(measure_cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(measure_cr, opt.font_size_px);
 
+  // Flash state
+  flash_state_t flash = { .active = false, .start = 0, .next = 0 };
+  if (opt.flash_minutes > 0) {
+    flash.next = schedule_first_flash(opt.flash_minutes, opt.debug);
+  }
+
   // Main loop: poll X for events, and redraw exactly each second.
   int xfd = xcb_get_file_descriptor(cconn);
   char last_str[64] = {0};
@@ -337,10 +378,32 @@ int main(int argc, char **argv) {
     }
 
     if (need_redraw) {
+      time_t now = time(NULL);
+
+      // Handle flash scheduling and lifecycle
+      if (opt.flash_minutes > 0) {
+        if (!flash.active && flash.next != 0 && now >= flash.next) {
+          flash.active = true;
+          flash.start = now;
+          flash.next += opt.flash_minutes * 60;
+          if (opt.debug) {
+            fprintf(stderr, "[debug] flash start: start=%ld next=%ld\n",
+                    (long)flash.start, (long)flash.next);
+          }
+        }
+        if (flash.active) {
+          double elapsed = difftime(now, flash.start);
+          if (elapsed >= FLASH_DURATION_SEC) {
+            flash.active = false;
+            if (opt.debug) fprintf(stderr, "[debug] flash end\n");
+          }
+        }
+      }
+
       char nowbuf[64];
       now_timestr(nowbuf, sizeof(nowbuf), opt.time_only);
 
-      // Only re-measure/reposition if text width changed (we measure every tick; cheap)
+      // Re-measure text
       cairo_select_font_face(measure_cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(measure_cr, opt.font_size_px);
 
@@ -370,6 +433,32 @@ int main(int argc, char **argv) {
       mask |= XCB_CONFIG_WINDOW_STACK_MODE; cfg[cidx++] = XCB_STACK_MODE_ABOVE;
       xcb_configure_window(cconn, win, mask, cfg);
 
+      // Compute colors (with optional flash fade)
+      double fg_r = opt.fg_r, fg_g = opt.fg_g, fg_b = opt.fg_b;
+      double bg_r = opt.bg_r, bg_g = opt.bg_g, bg_b = opt.bg_b;
+
+      if (flash.active) {
+        double elapsed = difftime(now, flash.start);
+        double p = elapsed / (double)FLASH_DURATION_SEC;
+        if (p < 0.0) p = 0.0; if (p > 1.0) p = 1.0;
+
+        double inv_fg_r = 1.0 - opt.fg_r, inv_fg_g = 1.0 - opt.fg_g, inv_fg_b = 1.0 - opt.fg_b;
+        double inv_bg_r = 1.0 - opt.bg_r, inv_bg_g = 1.0 - opt.bg_g, inv_bg_b = 1.0 - opt.bg_b;
+
+        fg_r = inv_fg_r * (1.0 - p) + opt.fg_r * p;
+        fg_g = inv_fg_g * (1.0 - p) + opt.fg_g * p;
+        fg_b = inv_fg_b * (1.0 - p) + opt.fg_b * p;
+
+        bg_r = inv_bg_r * (1.0 - p) + opt.bg_r * p;
+        bg_g = inv_bg_g * (1.0 - p) + opt.bg_g * p;
+        bg_b = inv_bg_b * (1.0 - p) + opt.bg_b * p;
+
+        if (opt.debug) {
+          fprintf(stderr, "[debug] flash tick: p=%.3f fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+                  p, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b);
+        }
+      }
+
       if (opt.debug) {
         fprintf(stderr, "[debug] tick str=\"%s\" text_w=%d text_h=%d win=%ux%u at (%d,%d)\n",
                 nowbuf, text_w, text_h, win_w, win_h, new_x, new_y);
@@ -380,13 +469,13 @@ int main(int argc, char **argv) {
       cairo_t *cr = cairo_create(surface);
 
       // Background
-      cairo_set_source_rgb(cr, opt.bg_r, opt.bg_g, opt.bg_b);
+      cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
       cairo_paint(cr);
 
       // Text
       cairo_select_font_face(cr, opt.font_family, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(cr, opt.font_size_px);
-      cairo_set_source_rgb(cr, opt.fg_r, opt.fg_g, opt.fg_b);
+      cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
 
       double text_x = pad - te.x_bearing;     // account for left bearing
       double text_y = pad + fe.ascent;        // baseline
