@@ -981,6 +981,9 @@ int main(int argc, char **argv) {
 
   // Track applied geometry so the once-per-second clock update does not ask
   // X11 to reconfigure an unchanged window and generate another expose cycle.
+  // The placeholder geometry is not cached, so the first rendered frame must
+  // explicitly apply every calculated field.
+  bool geometry_initialized = false;
   int16_t current_x = 0;
   int16_t current_y = 0;
   uint16_t current_w = 0;
@@ -1216,19 +1219,19 @@ int main(int argc, char **argv) {
       uint32_t cfg[4];
       uint16_t mask = 0;
       int cidx = 0;
-      if (new_x != current_x) {
+      if (!geometry_initialized || new_x != current_x) {
         mask |= XCB_CONFIG_WINDOW_X;
         cfg[cidx++] = (uint32_t)new_x;
       }
-      if (new_y != current_y) {
+      if (!geometry_initialized || new_y != current_y) {
         mask |= XCB_CONFIG_WINDOW_Y;
         cfg[cidx++] = (uint32_t)new_y;
       }
-      if (win_w != current_w) {
+      if (!geometry_initialized || win_w != current_w) {
         mask |= XCB_CONFIG_WINDOW_WIDTH;
         cfg[cidx++] = (uint32_t)win_w;
       }
-      if (win_h != current_h) {
+      if (!geometry_initialized || win_h != current_h) {
         mask |= XCB_CONFIG_WINDOW_HEIGHT;
         cfg[cidx++] = (uint32_t)win_h;
       }
@@ -1336,6 +1339,7 @@ int main(int argc, char **argv) {
         current_y = new_y;
         current_w = win_w;
         current_h = win_h;
+        geometry_initialized = true;
       }
       xcb_copy_area(cconn, back_pixmap, win, copy_gc,
                     0, 0, 0, 0, win_w, win_h);
