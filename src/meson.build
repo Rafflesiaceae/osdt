@@ -1,5 +1,6 @@
 deps = [
   dependency('xcb'),
+  dependency('xcb-randr'),
   dependency('xcb-shape'),
   dependency('cairo')
 ]

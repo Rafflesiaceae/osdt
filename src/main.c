@@ -17,6 +17,7 @@
 
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <xcb/randr.h>
 #include <xcb/shape.h>
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
@@ -60,6 +61,14 @@ typedef enum {
   ANCHOR_LEFT,
   ANCHOR_INVALID
 } anchor_t;
+
+typedef struct {
+  int x;
+  int y;
+  int w;
+  int h;
+  bool valid;
+} monitor_rect_t;
 
 static void print_help(const char *prog) {
   fprintf(stdout,
@@ -216,7 +225,8 @@ static anchor_t parse_anchor(const char *s) {
   return ANCHOR_INVALID;
 }
 
-static void anchor_position(anchor_t anchor, int screen_w, int screen_h,
+static void anchor_position(anchor_t anchor, int origin_x, int origin_y,
+                            int screen_w, int screen_h,
                             uint16_t win_w, uint16_t win_h, uint32_t margin_px,
                             int16_t *out_x, int16_t *out_y) {
   int x = 0;
@@ -256,8 +266,8 @@ static void anchor_position(anchor_t anchor, int screen_w, int screen_h,
       y = (int)margin_px;
       break;
   }
-  *out_x = (int16_t)x;
-  *out_y = (int16_t)y;
+  *out_x = (int16_t)(origin_x + x);
+  *out_y = (int16_t)(origin_y + y);
 }
 
 static void free_text_lines(text_lines_t *t) {
@@ -314,6 +324,82 @@ static bool load_text_lines(const char *path, text_lines_t *out) {
   free_text_lines(out);
   *out = tmp;
   return true;
+}
+
+static bool get_pointer_xy(xcb_connection_t *c, xcb_window_t root, int *x, int *y) {
+  xcb_query_pointer_cookie_t ck = xcb_query_pointer(c, root);
+  xcb_query_pointer_reply_t *rp = xcb_query_pointer_reply(c, ck, NULL);
+  if (!rp) return false;
+  *x = rp->root_x;
+  *y = rp->root_y;
+  free(rp);
+  return true;
+}
+
+static monitor_rect_t get_current_monitor(xcb_connection_t *c, xcb_window_t root,
+                                          xcb_screen_t *screen, bool debug) {
+  monitor_rect_t fallback = {
+    .x = 0, .y = 0,
+    .w = (int)screen->width_in_pixels,
+    .h = (int)screen->height_in_pixels,
+    .valid = true
+  };
+  int px = 0, py = 0;
+  if (!get_pointer_xy(c, root, &px, &py)) {
+    if (debug) fprintf(stderr, "[debug] pointer query failed; using full screen\n");
+    return fallback;
+  }
+
+  xcb_randr_get_monitors_cookie_t ck = xcb_randr_get_monitors(c, root, 1);
+  xcb_randr_get_monitors_reply_t *rp = xcb_randr_get_monitors_reply(c, ck, NULL);
+  if (!rp) {
+    if (debug) fprintf(stderr, "[debug] RandR get_monitors failed; using full screen\n");
+    return fallback;
+  }
+
+  monitor_rect_t picked = {0};
+  xcb_randr_monitor_info_iterator_t it = xcb_randr_get_monitors_monitors_iterator(rp);
+  int primary_idx = -1;
+  int idx = 0;
+  for (; it.rem; xcb_randr_monitor_info_next(&it), ++idx) {
+    xcb_randr_monitor_info_t *m = it.data;
+    int mx = (int)m->x;
+    int my = (int)m->y;
+    int mw = (int)m->width;
+    int mh = (int)m->height;
+    if (m->primary) primary_idx = idx;
+    if (px >= mx && px < mx + mw && py >= my && py < my + mh) {
+      picked = (monitor_rect_t){ .x = mx, .y = my, .w = mw, .h = mh, .valid = true };
+      break;
+    }
+  }
+
+  if (!picked.valid) {
+    int target_idx = (primary_idx >= 0) ? primary_idx : 0;
+    it = xcb_randr_get_monitors_monitors_iterator(rp);
+    idx = 0;
+    for (; it.rem; xcb_randr_monitor_info_next(&it), ++idx) {
+      if (idx == target_idx) {
+        xcb_randr_monitor_info_t *m = it.data;
+        picked = (monitor_rect_t){
+          .x = (int)m->x,
+          .y = (int)m->y,
+          .w = (int)m->width,
+          .h = (int)m->height,
+          .valid = true
+        };
+        break;
+      }
+    }
+  }
+
+  if (debug && picked.valid) {
+    fprintf(stderr, "[debug] monitor: %dx%d at (%d,%d) pointer=(%d,%d)\n",
+            picked.w, picked.h, picked.x, picked.y, px, py);
+  }
+
+  free(rp);
+  return picked.valid ? picked : fallback;
 }
 
 static long ms_to_next_second(void) {
@@ -645,7 +731,8 @@ int main(int argc, char **argv) {
 
       int16_t new_x = 0;
       int16_t new_y = 0;
-      anchor_position(anchor, (int)screen->width_in_pixels, (int)screen->height_in_pixels,
+      monitor_rect_t mon = get_current_monitor(cconn, screen->root, screen, opt.debug);
+      anchor_position(anchor, mon.x, mon.y, mon.w, mon.h,
                       win_w, win_h, opt.margin_px, &new_x, &new_y);
 
       uint32_t cfg[5];
