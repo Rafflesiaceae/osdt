@@ -70,6 +70,9 @@ Options:
   -a, --anchor POS      Anchor position: top, top-left, top-right, right,
                         bottom-right, bottom, bottom-left, left, center.
   -t, --text FILE       Show file contents below the time; watches for changes.
+                        Lines starting with ``#`` are ignored as comments.
+                        Trailing whitespace and surrounding blank lines are
+                        removed from file input.
                         Use "-" to read text from stdin; piped stdin is
                         auto-read when --text is not set. A zero byte
                         refreshes stdin text with the frame so far.

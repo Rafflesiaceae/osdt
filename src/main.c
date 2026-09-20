@@ -114,7 +114,9 @@ static void print_help(const char *prog) {
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 0).\n"
     "  -a, --anchor POS      Anchor position: top, top-left, top-right, right,\n"
     "                       bottom-right, bottom, bottom-left, left, center (default: top-right).\n"
-    "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
+    "  -t, --text FILE       Show normalized file contents below the time; watches for changes.\n"
+    "                       Lines starting with '#' are ignored as comments.\n"
+    "                       Trailing whitespace and surrounding blank lines are removed.\n"
     "                       Use '-' to read text from stdin; piped stdin is auto-read.\n"
     "                       A zero byte refreshes stdin text with the frame so far.\n"
     "  -img, --image FILE    Draw an image below the text at its native size.\n"
@@ -484,13 +486,23 @@ static bool load_text_lines_stream(FILE *f, text_lines_t *out) {
   size_t cap = 0;
   ssize_t nread;
 
-  // Store each input line without its line terminator so Cairo can render
-  // the stream as independent overlay rows.
+  // Normalize file input while storing it as independent overlay rows.
   while ((nread = getline(&line, &cap, f)) != -1) {
     size_t len = (size_t)nread;
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+    while (len > 0 && isspace((unsigned char)line[len - 1])) {
       len--;
     }
+
+    // A leading hash marks a whole-line comment in text files.
+    if (len > 0 && line[0] == '#') {
+      continue;
+    }
+
+    // Do not retain blank rows before the first visible line.
+    if (len == 0 && tmp.count == 0) {
+      continue;
+    }
+
     if (!append_text_line(&tmp, line, len)) {
       free(line);
       free_text_lines(&tmp);
@@ -499,6 +511,12 @@ static bool load_text_lines_stream(FILE *f, text_lines_t *out) {
     }
   }
   free(line);
+
+  // Blank rows within content are meaningful, but trailing ones are not.
+  while (tmp.count > 0 && tmp.lines[tmp.count - 1][0] == '\0') {
+    free(tmp.lines[tmp.count - 1]);
+    tmp.count--;
+  }
 
   free_text_lines(out);
   *out = tmp;
