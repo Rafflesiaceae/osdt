@@ -51,10 +51,10 @@ static void print_help(const char *prog) {
     "\n"
     "Options:\n"
     "  -f, --font FAMILY     Font family name (default: \"DejaVu Sans Mono\").\n"
-    "  -s, --size PX         Font size in pixels (default: 16).\n"
+    "  -s, --size PX         Font size in pixels (default: 14).\n"
     "      --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).\n"
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
-    "  -m, --margin PX       Outer margin from screen edges in pixels (default: 8).\n"
+    "  -m, --margin PX       Outer margin from screen edges in pixels (default: 0).\n"
     "  -t, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
     "  -c, --show-flash-count Append \"(N)\" with total flashes since start (N>0).\n"
@@ -191,8 +191,8 @@ static long ms_to_next_second(void) {
 int main(int argc, char **argv) {
   options_t opt = {
     .font_family = "DejaVu Sans Mono",
-    .font_size_px = 16.0,
-    .margin_px = 8,
+    .font_size_px = 14.0,
+    .margin_px = 0,
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .time_only = false,

@@ -54,10 +54,10 @@ Usage
 
 Options:
   -f, --font FAMILY     Font family name (default: "DejaVu Sans Mono").
-  -s, --size PX         Font size in pixels (default: 16).
+  -s, --size PX         Font size in pixels (default: 14).
       --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).
       --bg  #RRGGBB     Background color (default: #000000).
-  -m, --margin PX       Outer margin (default: 8).
+  -m, --margin PX       Outer margin (default: 0).
   -t, --time-only       Show only time (HH:MM:SS), omit the date.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
                         (minute % MIN == 0) at second 00. Disabled if 0.
