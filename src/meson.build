@@ -5,7 +5,7 @@ deps = [
 ]
 
 executable(
-  'x11-datetime-overlay',
+  'osdt',
   ['main.c'],
   dependencies: deps,
   install: true
