@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <math.h>
 #include <sys/inotify.h>
 
 #include <xcb/xcb.h>
@@ -22,9 +23,23 @@
 #include <xcb/shape.h>
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 #define FLASH_DURATION_SEC 30
 #define FLASH_STEP_MS 50
+
+typedef enum {
+  IMAGE_SIZE_NATIVE,
+  IMAGE_SIZE_EXACT,
+  IMAGE_SIZE_PERCENT
+} image_size_mode_t;
+
+typedef struct {
+  image_size_mode_t mode;
+  int width;
+  int height;
+  double percent;
+} image_size_t;
 
 typedef struct {
   const char *font_family;
@@ -34,6 +49,8 @@ typedef struct {
   double bg_r, bg_g, bg_b;
   const char *text_path;
   bool text_from_stdin;
+  const char *image_path;
+  const char *image_size_arg;
   const char *anchor;
   bool time_only;
   bool no_datetime;
@@ -86,7 +103,7 @@ static void print_help(const char *prog) {
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [-img|--image FILE [SIZE]] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -100,6 +117,9 @@ static void print_help(const char *prog) {
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
     "                       Use '-' to read text from stdin; piped stdin is auto-read.\n"
     "                       A zero byte refreshes stdin text with the frame so far.\n"
+    "  -img, --image FILE    Draw an image below the text at its native size.\n"
+    "      --image-size SIZE Resize it to WIDTHxHEIGHT or a percentage such as 50%%.\n"
+    "                       SIZE may instead follow FILE as a positional argument.\n"
     "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "      --no-datetime     Do not show the date or time; display only text input.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
@@ -108,9 +128,117 @@ static void print_help(const char *prog) {
     "  -h, --help            Show this help and exit.\n"
     "\n"
     "Example:\n"
-    "  %s --time-only --flash 1 --show-flash-count --font \"DejaVu Sans Mono\" --size 18 --fg #EAEAEA --bg #101010 --margin 10\n",
+    "  %s --no-datetime --image picture.png 50%% --anchor center\n",
     prog, prog, prog
   );
+}
+
+static bool parse_positive_int(const char *text, size_t len, int *out) {
+  if (len == 0 || len >= 32) return false;
+
+  char buf[32];
+  memcpy(buf, text, len);
+  buf[len] = '\0';
+
+  char *end = NULL;
+  errno = 0;
+  unsigned long value = strtoul(buf, &end, 10);
+  if (errno != 0 || end == buf || *end != '\0' || value == 0 || value > UINT16_MAX) {
+    return false;
+  }
+  *out = (int)value;
+  return true;
+}
+
+static bool parse_image_size(const char *arg, image_size_t *size) {
+  size_t len = strlen(arg);
+  if (len > 1 && arg[len - 1] == '%') {
+    char *end = NULL;
+    errno = 0;
+    double percent = strtod(arg, &end);
+    if (errno != 0 || end == arg || end != arg + len - 1 ||
+        !isfinite(percent) || percent <= 0.0) {
+      return false;
+    }
+    *size = (image_size_t){ .mode = IMAGE_SIZE_PERCENT, .percent = percent };
+    return true;
+  }
+
+  // Exact dimensions deliberately allow non-proportional resizing.
+  const char *separator = strchr(arg, 'x');
+  if (!separator) separator = strchr(arg, 'X');
+  int width = 0;
+  int height = 0;
+  if (!separator || strchr(separator + 1, 'x') || strchr(separator + 1, 'X') ||
+      !parse_positive_int(arg, (size_t)(separator - arg), &width) ||
+      !parse_positive_int(separator + 1, strlen(separator + 1), &height)) {
+    return false;
+  }
+  *size = (image_size_t){
+    .mode = IMAGE_SIZE_EXACT,
+    .width = width,
+    .height = height
+  };
+  return true;
+}
+
+static cairo_surface_t *load_image(const char *path, int *width, int *height) {
+  // Use Cairo's in-process PNG decoder first. Besides being faster for the
+  // most common overlay format, it also works when sandboxing prevents an
+  // installed GdkPixbuf loader from starting its helper process.
+  cairo_surface_t *surface = cairo_image_surface_create_from_png(path);
+  if (cairo_surface_status(surface) == CAIRO_STATUS_SUCCESS) {
+    *width = cairo_image_surface_get_width(surface);
+    *height = cairo_image_surface_get_height(surface);
+    return surface;
+  }
+  cairo_surface_destroy(surface);
+
+  // GdkPixbuf supplies JPEG and any additional formats for which the system
+  // has installed loaders.
+  GError *error = NULL;
+  GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, &error);
+  if (!pixbuf) {
+    fprintf(stderr, "Failed to load image \"%s\": %s\n", path,
+            error ? error->message : "unknown image error");
+    g_clear_error(&error);
+    return NULL;
+  }
+
+  *width = gdk_pixbuf_get_width(pixbuf);
+  *height = gdk_pixbuf_get_height(pixbuf);
+  surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, *width, *height);
+  if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+    fprintf(stderr, "Failed to allocate image surface for \"%s\": %s\n", path,
+            cairo_status_to_string(cairo_surface_status(surface)));
+    cairo_surface_destroy(surface);
+    g_object_unref(pixbuf);
+    return NULL;
+  }
+
+  const int source_stride = gdk_pixbuf_get_rowstride(pixbuf);
+  const int channels = gdk_pixbuf_get_n_channels(pixbuf);
+  const bool has_alpha = gdk_pixbuf_get_has_alpha(pixbuf);
+  const guchar *source = gdk_pixbuf_read_pixels(pixbuf);
+  const int target_stride = cairo_image_surface_get_stride(surface);
+  unsigned char *target = cairo_image_surface_get_data(surface);
+
+  // Cairo ARGB32 pixels are native-endian, premultiplied 32-bit values.
+  for (int y = 0; y < *height; ++y) {
+    const guchar *source_row = source + y * source_stride;
+    uint32_t *target_row = (uint32_t *)(target + y * target_stride);
+    for (int x = 0; x < *width; ++x) {
+      const guchar *pixel = source_row + x * channels;
+      uint32_t alpha = has_alpha ? pixel[3] : 255;
+      uint32_t red = ((uint32_t)pixel[0] * alpha + 127) / 255;
+      uint32_t green = ((uint32_t)pixel[1] * alpha + 127) / 255;
+      uint32_t blue = ((uint32_t)pixel[2] * alpha + 127) / 255;
+      target_row[x] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+    }
+  }
+  cairo_surface_mark_dirty(surface);
+  g_object_unref(pixbuf);
+  return surface;
 }
 
 static int parse_hex2(const char *p) {
@@ -586,6 +714,8 @@ int main(int argc, char **argv) {
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .text_path = NULL,
     .text_from_stdin = false,
+    .image_path = NULL,
+    .image_size_arg = NULL,
     .anchor = "top-right",
     .time_only = false,
     .no_datetime = false,
@@ -603,6 +733,9 @@ int main(int argc, char **argv) {
     {"margin",    required_argument, 0, 'm'},
     {"anchor",    required_argument, 0, 'a'},
     {"text",      required_argument, 0, 't'},
+    {"img",       required_argument, 0,  4  },
+    {"image",     required_argument, 0,  4  },
+    {"image-size", required_argument, 0, 5  },
     {"time-only", no_argument,       0, 'T'},
     {"no-datetime", no_argument,     0,  3  },
     {"flash",     required_argument, 0, 'F'},
@@ -612,7 +745,9 @@ int main(int argc, char **argv) {
   };
 
   int c, idx;
-  while ((c = getopt_long(argc, argv, "hf:s:m:a:t:F:cdT", long_opts, &idx)) != -1) {
+  // GNU's long-only parser supports both the requested -img spelling and
+  // conventional double-dash long options while retaining short options.
+  while ((c = getopt_long_only(argc, argv, "hf:s:m:a:t:F:cdT", long_opts, &idx)) != -1) {
     switch (c) {
       case 'h': print_help(argv[0]); return 0;
       case 'f': opt.font_family = optarg; break;
@@ -630,6 +765,8 @@ int main(int argc, char **argv) {
         break;
       case 'T': opt.time_only = true; break;
       case 3: opt.no_datetime = true; break;
+      case 4: opt.image_path = optarg; break;
+      case 5: opt.image_size_arg = optarg; break;
       case 'F': {
           long v = strtol(optarg, NULL, 10);
           if (v < 0) v = 0;
@@ -651,6 +788,28 @@ int main(int argc, char **argv) {
     }
   }
 
+  // A single positional argument after --image is its convenient resize
+  // form, for example: --image photo.jpg 50%.
+  if (optind < argc) {
+    if (opt.image_path && !opt.image_size_arg && optind + 1 == argc) {
+      opt.image_size_arg = argv[optind];
+    } else {
+      fprintf(stderr, "Unexpected argument \"%s\"\n", argv[optind]);
+      return 2;
+    }
+  }
+  if (opt.image_size_arg && !opt.image_path) {
+    fprintf(stderr, "--image-size requires --image\n");
+    return 2;
+  }
+
+  image_size_t image_size = { .mode = IMAGE_SIZE_NATIVE };
+  if (opt.image_size_arg && !parse_image_size(opt.image_size_arg, &image_size)) {
+    fprintf(stderr, "Invalid image size \"%s\"; use WIDTHxHEIGHT or PERCENT%%\n",
+            opt.image_size_arg);
+    return 2;
+  }
+
   anchor_t anchor = parse_anchor(opt.anchor);
   if (anchor == ANCHOR_INVALID) {
     fprintf(stderr, "Invalid --anchor value \"%s\"\n", opt.anchor ? opt.anchor : "");
@@ -664,17 +823,60 @@ int main(int argc, char **argv) {
   }
 
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d no_datetime=%d flash_minutes=%d show_flash_count=%d text=\"%s\" text_stdin=%d anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d no_datetime=%d flash_minutes=%d show_flash_count=%d text=\"%s\" text_stdin=%d image=\"%s\" image_size=\"%s\" anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
             opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.no_datetime, opt.flash_minutes,
             opt.show_flash_count, opt.text_path ? opt.text_path : "", opt.text_from_stdin,
+            opt.image_path ? opt.image_path : "", opt.image_size_arg ? opt.image_size_arg : "native",
             opt.anchor ? opt.anchor : "",
             opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
+  }
+
+  cairo_surface_t *image_surface = NULL;
+  int image_source_w = 0;
+  int image_source_h = 0;
+  int image_w = 0;
+  int image_h = 0;
+  if (opt.image_path) {
+    image_surface = load_image(opt.image_path, &image_source_w, &image_source_h);
+    if (!image_surface) return 1;
+
+    image_w = image_source_w;
+    image_h = image_source_h;
+    if (image_size.mode == IMAGE_SIZE_EXACT) {
+      image_w = image_size.width;
+      image_h = image_size.height;
+    } else if (image_size.mode == IMAGE_SIZE_PERCENT) {
+      double scaled_width = image_source_w * image_size.percent / 100.0;
+      double scaled_height = image_source_h * image_size.percent / 100.0;
+      if (scaled_width > UINT16_MAX || scaled_height > UINT16_MAX) {
+        fprintf(stderr, "Image resize \"%s\" exceeds X11's maximum dimensions\n",
+                opt.image_size_arg);
+        cairo_surface_destroy(image_surface);
+        return 2;
+      }
+      image_w = (int)(scaled_width + 0.5);
+      image_h = (int)(scaled_height + 0.5);
+      if (image_w < 1) image_w = 1;
+      if (image_h < 1) image_h = 1;
+    }
+    uint64_t padded_width = (uint64_t)image_w + 2u * opt.margin_px;
+    uint64_t padded_height = (uint64_t)image_h + 2u * opt.margin_px;
+    if (padded_width > UINT16_MAX || padded_height > UINT16_MAX) {
+      fprintf(stderr, "Displayed image plus margin exceeds X11's maximum dimensions\n");
+      cairo_surface_destroy(image_surface);
+      return 2;
+    }
+    if (opt.debug) {
+      fprintf(stderr, "[debug] image: source=%dx%d display=%dx%d\n",
+              image_source_w, image_source_h, image_w, image_h);
+    }
   }
 
   int screen_num = 0;
   xcb_connection_t *cconn = xcb_connect(NULL, &screen_num);
   if (!cconn || xcb_connection_has_error(cconn)) {
     fprintf(stderr, "Failed to connect to X server\n");
+    if (image_surface) cairo_surface_destroy(image_surface);
     return 1;
   }
 
@@ -684,6 +886,7 @@ int main(int argc, char **argv) {
   xcb_screen_t *screen = iter.data;
   if (!screen) {
     fprintf(stderr, "Could not get default screen\n");
+    if (image_surface) cairo_surface_destroy(image_surface);
     xcb_disconnect(cconn);
     return 1;
   }
@@ -695,6 +898,7 @@ int main(int argc, char **argv) {
   xcb_visualtype_t *visual = get_visualtype_for_screen(setup, screen);
   if (!visual) {
     fprintf(stderr, "Could not find visual for screen\n");
+    if (image_surface) cairo_surface_destroy(image_surface);
     xcb_disconnect(cconn);
     return 1;
   }
@@ -944,24 +1148,22 @@ int main(int argc, char **argv) {
       double line_h = fe.ascent + fe.descent;
       size_t datetime_lines = opt.no_datetime ? 0 : 1;
       size_t total_lines = datetime_lines + text.count;
-      size_t layout_lines = (total_lines > 0) ? total_lines : 1;
       int text_w = 0;
-      for (size_t i = 0; i < layout_lines; ++i) {
-        const char *line = "";
-        if (i < total_lines) {
-          line = (i < datetime_lines) ? dispbuf : text.lines[i - datetime_lines];
-        }
+      for (size_t i = 0; i < total_lines; ++i) {
+        const char *line = (i < datetime_lines) ? dispbuf : text.lines[i - datetime_lines];
         cairo_text_extents(measure_cr, line, &te);
         double line_wd = te.x_advance;
         if (te.width > line_wd) line_wd = te.width;
         int line_w = (int)(line_wd + 0.5);
         if (line_w > text_w) text_w = line_w;
       }
-      int text_h = (int)(line_h * (double)layout_lines + 0.5);
+      int text_h = (int)(line_h * (double)total_lines + 0.5);
 
       uint16_t pad = (uint16_t)(opt.margin_px);
-      uint16_t win_w = (uint16_t)(text_w + pad * 2);
-      uint16_t win_h = (uint16_t)(text_h + pad * 2);
+      int content_w = text_w > image_w ? text_w : image_w;
+      int content_h = text_h + image_h;
+      uint16_t win_w = (uint16_t)(content_w + pad * 2);
+      uint16_t win_h = (uint16_t)(content_h + pad * 2);
       // X11 windows cannot be zero-sized; keep textless overlays valid while
       // still drawing no visible datetime content.
       if (win_w == 0) win_w = 1;
@@ -1044,6 +1246,23 @@ int main(int argc, char **argv) {
         cairo_move_to(cr, text_x, text_y);
         cairo_show_text(cr, line);
       }
+
+      if (image_surface) {
+        // Clip before scaling so interpolation cannot paint outside the
+        // image's allocated part of the overlay.
+        double image_x = pad;
+        double image_y = pad + text_h;
+        cairo_save(cr);
+        cairo_rectangle(cr, image_x, image_y, image_w, image_h);
+        cairo_clip(cr);
+        cairo_translate(cr, image_x, image_y);
+        cairo_scale(cr, (double)image_w / image_source_w,
+                    (double)image_h / image_source_h);
+        cairo_set_source_surface(cr, image_surface, 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+        cairo_paint(cr);
+        cairo_restore(cr);
+      }
       cairo_surface_flush(surface);
       cairo_destroy(cr);
       cairo_surface_destroy(surface);
@@ -1059,6 +1278,7 @@ int main(int argc, char **argv) {
   free_text_lines(&text);
   cairo_destroy(measure_cr);
   cairo_surface_destroy(measure_surface);
+  if (image_surface) cairo_surface_destroy(image_surface);
   xcb_disconnect(cconn);
   return 0;
 }

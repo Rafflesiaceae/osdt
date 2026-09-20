@@ -28,20 +28,23 @@ Features
   accepted either with ``--text -`` or by piping text into ``osdt``. While
   stdin is open, writing a zero byte publishes the frame written so far and
   starts the next realtime update frame.
+- ``-img FILE`` or ``--image FILE`` draws an image below any clock and text.
+  Images use their native dimensions unless resized to ``WIDTHxHEIGHT`` or a
+  percentage such as ``50%``.
 
 Build
 -----
-You need the development packages for XCB, XCB-Shape, and Cairo:
+You need the development packages for XCB, XCB-Shape, Cairo, and GdkPixbuf:
 
 Debian/Ubuntu::
 
   sudo apt install build-essential meson ninja-build pkg-config \
-       libxcb1-dev libxcb-shape0-dev libcairo2-dev
+       libxcb1-dev libxcb-shape0-dev libcairo2-dev libgdk-pixbuf-2.0-dev
 
 Fedora::
 
   sudo dnf install meson ninja-build pkgconf-pkg-config \
-       libxcb-devel xcb-util-wm-devel cairo-devel
+       libxcb-devel xcb-util-wm-devel cairo-devel gdk-pixbuf2-devel
 
 Then build and run::
 
@@ -55,7 +58,7 @@ Usage
 -----
 ::
 
-  osdt [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]
+  osdt [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [-img|--image FILE [SIZE]] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]
   osdt -h | --help
 
 Options:
@@ -70,6 +73,9 @@ Options:
                         Use "-" to read text from stdin; piped stdin is
                         auto-read when --text is not set. A zero byte
                         refreshes stdin text with the frame so far.
+  -img, --image FILE    Draw an image below any text at its native size.
+      --image-size SIZE Resize it to WIDTHxHEIGHT or a percentage such as 50%.
+                        SIZE may instead follow FILE as a positional argument.
   -T, --time-only       Show only time (HH:MM:SS), omit the date.
       --no-datetime     Do not show the date or time; display only text input.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
@@ -84,6 +90,12 @@ Stdin examples::
   printf 'Build finished\nWarnings: 0\n' | osdt --no-datetime
   while true; do printf 'CPU: %s%%\0' "$(top -bn1 | awk '/Cpu/ {print $2}')"; sleep 1; done | osdt --no-datetime
   osdt --text - --anchor bottom-right < status.txt
+
+Image examples::
+
+  osdt --no-datetime --image photo.jpg --anchor center
+  osdt --no-datetime -img photo.jpg 50%
+  osdt --image photo.jpg --image-size 320x180 --time-only
 
 Notes on Window Behavior
 ------------------------
