@@ -14,6 +14,8 @@ Features
 - Click-through (no input), so it never interferes with your workflow.
 - Configurable font family, font size (px), foreground and background colors.
 - **New:** ``--time-only`` to show ``HH:MM:SS`` (no date).
+- ``--no-datetime`` suppresses the clock line so only file or stdin text is
+  displayed.
 - **New:** ``--debug`` adds verbose diagnostics to stderr.
 - **New:** ``--flash MIN`` inverts colors when ``minute % MIN == 0`` and
   ``second == 0``, then smoothly fades back to normal over 30 seconds with
@@ -51,7 +53,7 @@ Usage
 -----
 ::
 
-  osdt [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]
+  osdt [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]
   osdt -h | --help
 
 Options:
@@ -66,6 +68,7 @@ Options:
                         Use "-" to read text from stdin once; piped stdin is
                         auto-read when --text is not set.
   -T, --time-only       Show only time (HH:MM:SS), omit the date.
+      --no-datetime     Do not show the date or time; display only text input.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
                         (minute % MIN == 0) at second 00. Disabled if 0.
   -c, --show-flash-count
@@ -75,7 +78,7 @@ Options:
 
 Stdin examples::
 
-  printf 'Build finished\nWarnings: 0\n' | osdt --time-only
+  printf 'Build finished\nWarnings: 0\n' | osdt --no-datetime
   osdt --text - --anchor bottom-right < status.txt
 
 Notes on Window Behavior

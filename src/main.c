@@ -35,6 +35,7 @@ typedef struct {
   bool text_from_stdin;
   const char *anchor;
   bool time_only;
+  bool no_datetime;
   bool debug;
   int flash_minutes; // 0 disables
   bool show_flash_count;
@@ -76,7 +77,7 @@ static void print_help(const char *prog) {
     "x11-datetime-overlay - tiny always-on-top datetime overlay (XCB)\n"
     "\n"
     "Usage:\n"
-    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]\n"
+    "  %s [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--no-datetime] [--flash MIN] [--show-flash-count] [--debug]\n"
     "  %s -h | --help\n"
     "\n"
     "Options:\n"
@@ -90,6 +91,7 @@ static void print_help(const char *prog) {
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
     "                       Use '-' to read text from stdin once; piped stdin is auto-read.\n"
     "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
+    "      --no-datetime     Do not show the date or time; display only text input.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
     "  -c, --show-flash-count Append \"(N)\" with total flashes since start (N>0).\n"
     "  -d, --debug           Verbose debug logs to stderr.\n"
@@ -431,6 +433,7 @@ int main(int argc, char **argv) {
     .text_from_stdin = false,
     .anchor = "top-right",
     .time_only = false,
+    .no_datetime = false,
     .debug = false,
     .flash_minutes = 0,
     .show_flash_count = false
@@ -446,6 +449,7 @@ int main(int argc, char **argv) {
     {"anchor",    required_argument, 0, 'a'},
     {"text",      required_argument, 0, 't'},
     {"time-only", no_argument,       0, 'T'},
+    {"no-datetime", no_argument,     0,  3  },
     {"flash",     required_argument, 0, 'F'},
     {"show-flash-count", no_argument, 0, 'c'},
     {"debug",     no_argument,       0, 'd'},
@@ -470,6 +474,7 @@ int main(int argc, char **argv) {
         }
         break;
       case 'T': opt.time_only = true; break;
+      case 3: opt.no_datetime = true; break;
       case 'F': {
           long v = strtol(optarg, NULL, 10);
           if (v < 0) v = 0;
@@ -504,8 +509,8 @@ int main(int argc, char **argv) {
   }
 
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" text_stdin=%d anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
-            opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d no_datetime=%d flash_minutes=%d show_flash_count=%d text=\"%s\" text_stdin=%d anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+            opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.no_datetime, opt.flash_minutes,
             opt.show_flash_count, opt.text_path ? opt.text_path : "", opt.text_from_stdin,
             opt.anchor ? opt.anchor : "",
             opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
@@ -722,16 +727,19 @@ int main(int argc, char **argv) {
         }
       }
 
-      char nowbuf[64];
-      now_timestr(nowbuf, sizeof(nowbuf), opt.time_only);
+      char dispbuf[128] = {0};
+      if (!opt.no_datetime) {
+        char nowbuf[64];
+        now_timestr(nowbuf, sizeof(nowbuf), opt.time_only);
 
-      // Compose display string with optional flash count
-      char dispbuf[128];
-      if (opt.show_flash_count && flash_count > 0) {
-        snprintf(dispbuf, sizeof(dispbuf), "%s (%llu)", nowbuf,
-                 (unsigned long long)flash_count);
-      } else {
-        snprintf(dispbuf, sizeof(dispbuf), "%s", nowbuf);
+        // Compose the clock line with the optional flash count. The count is
+        // tied to the datetime line, so --no-datetime suppresses it too.
+        if (opt.show_flash_count && flash_count > 0) {
+          snprintf(dispbuf, sizeof(dispbuf), "%s (%llu)", nowbuf,
+                   (unsigned long long)flash_count);
+        } else {
+          snprintf(dispbuf, sizeof(dispbuf), "%s", nowbuf);
+        }
       }
 
       // Re-measure text
@@ -743,21 +751,30 @@ int main(int argc, char **argv) {
       cairo_font_extents(measure_cr, &fe);
 
       double line_h = fe.ascent + fe.descent;
-      size_t total_lines = 1 + text.count;
+      size_t datetime_lines = opt.no_datetime ? 0 : 1;
+      size_t total_lines = datetime_lines + text.count;
+      size_t layout_lines = (total_lines > 0) ? total_lines : 1;
       int text_w = 0;
-      for (size_t i = 0; i < total_lines; ++i) {
-        const char *line = (i == 0) ? dispbuf : text.lines[i - 1];
+      for (size_t i = 0; i < layout_lines; ++i) {
+        const char *line = "";
+        if (i < total_lines) {
+          line = (i < datetime_lines) ? dispbuf : text.lines[i - datetime_lines];
+        }
         cairo_text_extents(measure_cr, line, &te);
         double line_wd = te.x_advance;
         if (te.width > line_wd) line_wd = te.width;
         int line_w = (int)(line_wd + 0.5);
         if (line_w > text_w) text_w = line_w;
       }
-      int text_h = (int)(line_h * (double)total_lines + 0.5);
+      int text_h = (int)(line_h * (double)layout_lines + 0.5);
 
       uint16_t pad = (uint16_t)(opt.margin_px);
       uint16_t win_w = (uint16_t)(text_w + pad * 2);
       uint16_t win_h = (uint16_t)(text_h + pad * 2);
+      // X11 windows cannot be zero-sized; keep textless overlays valid while
+      // still drawing no visible datetime content.
+      if (win_w == 0) win_w = 1;
+      if (win_h == 0) win_h = 1;
 
       int16_t new_x = 0;
       int16_t new_y = 0;
@@ -829,7 +846,7 @@ int main(int argc, char **argv) {
       cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
 
       for (size_t i = 0; i < total_lines; ++i) {
-        const char *line = (i == 0) ? dispbuf : text.lines[i - 1];
+        const char *line = (i < datetime_lines) ? dispbuf : text.lines[i - datetime_lines];
         cairo_text_extents(cr, line, &te);
         double text_x = pad - te.x_bearing;     // account for left bearing
         double text_y = pad + fe.ascent + (double)i * line_h; // baseline
