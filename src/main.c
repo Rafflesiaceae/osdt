@@ -32,6 +32,7 @@ typedef struct {
   double fg_r, fg_g, fg_b;
   double bg_r, bg_g, bg_b;
   const char *text_path;
+  bool text_from_stdin;
   const char *anchor;
   bool time_only;
   bool debug;
@@ -87,6 +88,7 @@ static void print_help(const char *prog) {
     "  -a, --anchor POS      Anchor position: top, top-left, top-right, right,\n"
     "                       bottom-right, bottom, bottom-left, left (default: top-right).\n"
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
+    "                       Use '-' to read text from stdin once; piped stdin is auto-read.\n"
     "  -T, --time-only       Show only time (HH:MM:SS), omit the date.\n"
     "  -F, --flash MIN       Boundary flash at minute %% MIN == 0 (sec==00), fade 30s.\n"
     "  -c, --show-flash-count Append \"(N)\" with total flashes since start (N>0).\n"
@@ -280,17 +282,14 @@ static void free_text_lines(text_lines_t *t) {
   t->count = 0;
 }
 
-static bool load_text_lines(const char *path, text_lines_t *out) {
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    free_text_lines(out);
-    return false;
-  }
-
+static bool load_text_lines_stream(FILE *f, text_lines_t *out) {
   text_lines_t tmp = {0};
   char *line = NULL;
   size_t cap = 0;
   ssize_t nread;
+
+  // Store each input line without its line terminator so Cairo can render
+  // the stream as independent overlay rows.
   while ((nread = getline(&line, &cap, f)) != -1) {
     size_t len = (size_t)nread;
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
@@ -319,11 +318,22 @@ static bool load_text_lines(const char *path, text_lines_t *out) {
     tmp.lines[tmp.count++] = copy;
   }
   free(line);
-  fclose(f);
 
   free_text_lines(out);
   *out = tmp;
   return true;
+}
+
+static bool load_text_lines(const char *path, text_lines_t *out) {
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    free_text_lines(out);
+    return false;
+  }
+
+  bool ok = load_text_lines_stream(f, out);
+  fclose(f);
+  return ok;
 }
 
 static bool get_pointer_xy(xcb_connection_t *c, xcb_window_t root, int *x, int *y) {
@@ -418,6 +428,7 @@ int main(int argc, char **argv) {
     .fg_r = 1.0, .fg_g = 1.0, .fg_b = 1.0,
     .bg_r = 0.0, .bg_g = 0.0, .bg_b = 0.0,
     .text_path = NULL,
+    .text_from_stdin = false,
     .anchor = "top-right",
     .time_only = false,
     .debug = false,
@@ -449,7 +460,15 @@ int main(int argc, char **argv) {
       case 's': opt.font_size_px = strtod(optarg, NULL); if (opt.font_size_px <= 0) opt.font_size_px = 16.0; break;
       case 'm': opt.margin_px = (uint32_t)strtoul(optarg, NULL, 10); break;
       case 'a': opt.anchor = optarg; break;
-      case 't': opt.text_path = optarg; break;
+      case 't':
+        if (strcmp(optarg, "-") == 0) {
+          opt.text_from_stdin = true;
+          opt.text_path = NULL;
+        } else {
+          opt.text_path = optarg;
+          opt.text_from_stdin = false;
+        }
+        break;
       case 'T': opt.time_only = true; break;
       case 'F': {
           long v = strtol(optarg, NULL, 10);
@@ -478,10 +497,17 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  // Treat piped input as overlay text when no explicit text file was chosen.
+  // Interactive stdin remains ignored so a normal launch never blocks.
+  if (!opt.text_path && !opt.text_from_stdin && !isatty(STDIN_FILENO)) {
+    opt.text_from_stdin = true;
+  }
+
   if (opt.debug) {
-    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
+    fprintf(stderr, "[debug] opts: font=\"%s\" size=%.1f margin=%u time_only=%d flash_minutes=%d show_flash_count=%d text=\"%s\" text_stdin=%d anchor=\"%s\" fg=%.3f,%.3f,%.3f bg=%.3f,%.3f,%.3f\n",
             opt.font_family, opt.font_size_px, opt.margin_px, opt.time_only, opt.flash_minutes,
-            opt.show_flash_count, opt.text_path ? opt.text_path : "", opt.anchor ? opt.anchor : "",
+            opt.show_flash_count, opt.text_path ? opt.text_path : "", opt.text_from_stdin,
+            opt.anchor ? opt.anchor : "",
             opt.fg_r, opt.fg_g, opt.fg_b, opt.bg_r, opt.bg_g, opt.bg_b);
   }
 
@@ -578,7 +604,11 @@ int main(int argc, char **argv) {
   int text_wd = -1;
   const uint32_t text_watch_mask = IN_CLOSE_WRITE | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF | IN_ATTRIB | IN_MOVED_TO | IN_CREATE;
 
-  if (opt.text_path) {
+  if (opt.text_from_stdin) {
+    if (!load_text_lines_stream(stdin, &text) && opt.debug) {
+      fprintf(stderr, "[debug] failed to load text from stdin: %s\n", strerror(errno));
+    }
+  } else if (opt.text_path) {
     if (!load_text_lines(opt.text_path, &text) && opt.debug) {
       fprintf(stderr, "[debug] failed to load text file \"%s\": %s\n",
               opt.text_path, strerror(errno));

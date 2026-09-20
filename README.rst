@@ -22,6 +22,8 @@ Features
   current background for maximum contrast.
 - **New:** ``--show-flash-count`` appends ``(N)`` with the number of flashes
   since program start (only shown when ``N > 0``).
+- ``--text FILE`` can display extra lines below the clock, and stdin is
+  accepted either with ``--text -`` or by piping text into ``osdt``.
 
 Build
 -----
@@ -49,8 +51,8 @@ Usage
 -----
 ::
 
-  x11-datetime-overlay [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--time-only] [--flash MIN] [--show-flash-count] [--debug]
-  x11-datetime-overlay -h | --help
+  osdt [--font FAMILY] [--size PX] [--fg #RRGGBB] [--bg #RRGGBB] [--margin PX] [--anchor POS] [--text FILE] [--time-only] [--flash MIN] [--show-flash-count] [--debug]
+  osdt -h | --help
 
 Options:
   -f, --font FAMILY     Font family name (default: "DejaVu Sans Mono").
@@ -58,13 +60,23 @@ Options:
       --fg  #RRGGBB     Foreground/text color (default: #FFFFFF).
       --bg  #RRGGBB     Background color (default: #000000).
   -m, --margin PX       Outer margin (default: 0).
-  -t, --time-only       Show only time (HH:MM:SS), omit the date.
+  -a, --anchor POS      Anchor position: top, top-left, top-right, right,
+                        bottom-right, bottom, bottom-left, left.
+  -t, --text FILE       Show file contents below the time; watches for changes.
+                        Use "-" to read text from stdin once; piped stdin is
+                        auto-read when --text is not set.
+  -T, --time-only       Show only time (HH:MM:SS), omit the date.
   -F, --flash MIN       Boundary-aligned flash: triggers at each minute where
                         (minute % MIN == 0) at second 00. Disabled if 0.
   -c, --show-flash-count
                         Append "(N)" with total flashes since start (N>0).
   -d, --debug           Verbose debug logs to stderr (window geometry, events).
   -h, --help            Show help.
+
+Stdin examples::
+
+  printf 'Build finished\nWarnings: 0\n' | osdt --time-only
+  osdt --text - --anchor bottom-right < status.txt
 
 Notes on Window Behavior
 ------------------------
