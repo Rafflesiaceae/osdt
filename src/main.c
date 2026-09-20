@@ -69,6 +69,7 @@ typedef enum {
   ANCHOR_BOTTOM,
   ANCHOR_BOTTOM_LEFT,
   ANCHOR_LEFT,
+  ANCHOR_CENTER,
   ANCHOR_INVALID
 } anchor_t;
 
@@ -95,7 +96,7 @@ static void print_help(const char *prog) {
     "      --bg  #RRGGBB     Background color (default: #000000).\n"
     "  -m, --margin PX       Outer margin from screen edges in pixels (default: 0).\n"
     "  -a, --anchor POS      Anchor position: top, top-left, top-right, right,\n"
-    "                       bottom-right, bottom, bottom-left, left (default: top-right).\n"
+    "                       bottom-right, bottom, bottom-left, left, center (default: top-right).\n"
     "  -t, --text FILE       Show file contents line-by-line below the time; watches for changes.\n"
     "                       Use '-' to read text from stdin; piped stdin is auto-read.\n"
     "                       A zero byte refreshes stdin text with the frame so far.\n"
@@ -235,6 +236,7 @@ static anchor_t parse_anchor(const char *s) {
   if (strcmp(s, "bottom") == 0) return ANCHOR_BOTTOM;
   if (strcmp(s, "bottom-left") == 0) return ANCHOR_BOTTOM_LEFT;
   if (strcmp(s, "left") == 0) return ANCHOR_LEFT;
+  if (strcmp(s, "center") == 0) return ANCHOR_CENTER;
   return ANCHOR_INVALID;
 }
 
@@ -271,6 +273,11 @@ static void anchor_position(anchor_t anchor, int origin_x, int origin_y,
       break;
     case ANCHOR_LEFT:
       x = (int)margin_px;
+      y = (screen_h - (int)win_h) / 2;
+      break;
+    case ANCHOR_CENTER:
+      // Center ignores the edge margin because it is not anchored to a screen edge.
+      x = (screen_w - (int)win_w) / 2;
       y = (screen_h - (int)win_h) / 2;
       break;
     case ANCHOR_TOP_RIGHT:

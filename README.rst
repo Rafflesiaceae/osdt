@@ -65,7 +65,7 @@ Options:
       --bg  #RRGGBB     Background color (default: #000000).
   -m, --margin PX       Outer margin (default: 0).
   -a, --anchor POS      Anchor position: top, top-left, top-right, right,
-                        bottom-right, bottom, bottom-left, left.
+                        bottom-right, bottom, bottom-left, left, center.
   -t, --text FILE       Show file contents below the time; watches for changes.
                         Use "-" to read text from stdin; piped stdin is
                         auto-read when --text is not set. A zero byte
