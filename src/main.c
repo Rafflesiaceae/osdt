@@ -1306,6 +1306,8 @@ int main(int argc, char **argv) {
         const char *line = (i < datetime_lines) ? dispbuf : text.lines[i - datetime_lines];
         cairo_text_extents(cr, line, &te);
         double text_x = pad - te.x_bearing;     // account for left bearing
+        // Keep the clock at the right edge even when other content is wider.
+        if (i < datetime_lines) text_x += content_w - te.width;
         double text_y = pad + fe.ascent + (double)i * line_h; // baseline
         cairo_move_to(cr, text_x, text_y);
         cairo_show_text(cr, line);
